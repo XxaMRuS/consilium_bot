@@ -1,0 +1,23 @@
+[
+    {
+        "name": "Приседания",
+        "metric": "reps",
+        "description": "Классические приседания со штангой",
+        "points": 10,
+        "week": 0
+    },
+    {
+        "name": "Берпи",
+        "metric": "reps",
+        "description": "Взрывное упражнение",
+        "points": 15,
+        "week": 0
+    },
+    {
+        "name": "Бег 1 км",
+        "metric": "time",
+        "description": "Бег на время",
+        "points": 20,
+        "week": 0
+    }
+]

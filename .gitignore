@@ -1,0 +1,26 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Базы данных
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Логи
+*.log
+consilium.log
+
+# Секреты
+.env
+
+# Файлы IDE
+.idea/
+.vscode/
+*.pyc
+__pycache__/
+
+# Бэкапы
+*_backup.db
