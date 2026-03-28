@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-DB_NAME = "workouts_test.db"
+DB_NAME = "workouts.db"
 EXERCISES_JSON = "exercises.json"
 
 def backup_database():
