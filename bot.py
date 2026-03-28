@@ -335,6 +335,19 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("❌ Произошла ошибка. Попробуй позже.")
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Если user_data ещё не создан, создаём пустой словарь
+        if context.user_data is None:
+            context.user_data = {}
+
+        # Если активен диалог сдачи результата — пропускаем
+        if context.user_data.get('conversation_state') is not None:
+            logger.info("menu_handler пропускает сообщение, так как активен диалог сдачи результата")
+            return
+
+        if not update.message:
+            return
+        # ... остальной код
     # Если активен диалог сдачи результата – не мешаем
     if context.user_data.get('conversation_state') is not None:
         logger.info("menu_handler пропускает сообщение, так как активен диалог сдачи результата")
@@ -1088,11 +1101,61 @@ async def challenge_bonus_input(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop(key, None)
     return ConversationHandler.END
 
+
+async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Публикует комментарий в канале."""
+    import sqlite3
+    from database import DB_NAME
+
+    comment_text = update.message.text.strip()
+    user_id = update.effective_user.id
+    channel_id = context.user_data.get('comment_target_chat_id')
+    target_message_id = context.user_data.get('comment_target_message_id')
+
+    if not channel_id or not target_message_id:
+        await update.message.reply_text("❌ Ошибка: не удалось определить сообщение для комментария.")
+        context.user_data.pop('comment_state', None)
+        return
+
+    # Получаем имя пользователя
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT first_name, username FROM users WHERE user_id = ?", (user_id,))
+    user_row = cur.fetchone()
+    conn.close()
+    user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
+
+    # Формируем текст комментария
+    comment_text_formatted = f"💬 **{user_name}** комментирует:\n{comment_text}"
+
+    # Отправляем комментарий в канал как ответ на сообщение с результатом
+    await context.bot.send_message(
+        chat_id=channel_id,
+        text=comment_text_formatted,
+        parse_mode='Markdown',
+        reply_to_message_id=target_message_id
+    )
+
+    # Подтверждение пользователю
+    await update.message.reply_text("✅ Ваш комментарий опубликован в канале!")
+
+    # Очищаем состояние
+    context.user_data.pop('comment_state', None)
+    context.user_data.pop('comment_target_chat_id', None)
+    context.user_data.pop('comment_target_message_id', None)
+
 # ========== ДИАЛОГ СДАЧИ РЕЗУЛЬТАТА (без ConversationHandler) ==========
 async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает текстовые сообщения в зависимости от состояния диалога."""
+    print("=== catch_all_text: сообщение получено ===")
     if not update.message or not update.message.text:
         return
+
+    # Проверяем, не комментарий ли это
+    if context.user_data.get('comment_state') == 'await_comment':
+        await handle_comment(update, context)
+        return
+
     state = context.user_data.get('conversation_state')
     print(f"ПЕРЕХВАТ: сообщение '{update.message.text}', state={state}")
     if state == 60:
@@ -1616,6 +1679,26 @@ init_db()
 backup_database()
 Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthCheckHandler).serve_forever(), daemon=True).start()
 
+
+async def comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатия кнопки 'Комментировать'."""
+    query = update.callback_query
+    await query.answer()
+
+    # Получаем ID сообщения, под которым нажали кнопку
+    message_id = int(query.data.split('_')[1])
+
+    # Сохраняем данные в user_data
+    context.user_data['comment_target_chat_id'] = query.message.chat_id
+    context.user_data['comment_target_message_id'] = message_id
+    context.user_data['comment_state'] = 'await_comment'
+
+    # Отправляем сообщение в личный чат пользователя
+    await update.effective_user.send_message(
+        "✏️ Напишите ваш комментарий к этому результату.\n\n"
+        "Комментарий будет опубликован в канале под сообщением с результатом."
+    )
+
 # ========== ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ==========
 def main():
     logger.info("MAIN: started")
@@ -1660,6 +1743,8 @@ def main():
     app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
     app.add_handler(CommandHandler("publish_complex", publish_complex_command))
     app.add_handler(CommandHandler("skip", submit_comment_skip))  # обработчик /skip
+    # Обработчик нажатия кнопки "Комментировать"
+    app.add_handler(CallbackQueryHandler(comment_callback, pattern='^comment_'))
 
     # Диалог выполнения комплекса (через команду /complex)
     complex_conv = ConversationHandler(
@@ -1760,7 +1845,49 @@ def main():
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
 
     # Обработчик всех текстовых сообщений для ручного диалога сдачи результата
-    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
+
+    async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Публикует комментарий в канале."""
+        import sqlite3
+        from database import DB_NAME
+
+        comment_text = update.message.text.strip()
+        user_id = update.effective_user.id
+        channel_id = context.user_data.get('comment_target_chat_id')
+        target_message_id = context.user_data.get('comment_target_message_id')
+
+        if not channel_id or not target_message_id:
+            await update.message.reply_text("❌ Ошибка: не удалось определить сообщение для комментария.")
+            context.user_data.pop('comment_state', None)
+            return
+
+        # Получаем имя пользователя
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+        cur.execute("SELECT first_name, username FROM users WHERE user_id = ?", (user_id,))
+        user_row = cur.fetchone()
+        conn.close()
+        user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
+
+        # Формируем текст комментария
+        comment_text_formatted = f"💬 **{user_name}** комментирует:\n{comment_text}"
+
+        # Отправляем комментарий в канал как ответ на сообщение с результатом
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=comment_text_formatted,
+            parse_mode='Markdown',
+            reply_to_message_id=target_message_id
+        )
+
+        # Подтверждение пользователю
+        await update.message.reply_text("✅ Ваш комментарий опубликован в канале!")
+
+        # Очищаем состояние
+        context.user_data.pop('comment_state', None)
+        context.user_data.pop('comment_target_chat_id', None)
+        context.user_data.pop('comment_target_message_id', None)
 
     # Обработчики колбэков
     app.add_handler(CallbackQueryHandler(button_handler, pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
