@@ -1,11 +1,11 @@
 import logging
 import re
 import sqlite3
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import DB_NAME, get_complex_by_id
 
-# Константы состояний (должны совпадать с теми, что в bot.py)
+# Константы состояний
 AWAIT_SUBMIT_RESULT = 60
 AWAIT_SUBMIT_VIDEO = 61
 AWAIT_SUBMIT_COMMENT = 62
@@ -21,15 +21,12 @@ async def submit_complex_callback(update: Update, context: ContextTypes.DEFAULT_
 
     complex_id = int(query.data.split('_')[2])
 
-    # Сохраняем данные для публикации результата
     context.user_data['submit_entity_type'] = 'complex'
     context.user_data['submit_entity_id'] = complex_id
     context.user_data['submit_channel_post_id'] = query.message.message_id
     context.user_data['submit_channel_id'] = query.message.chat_id
-    # Устанавливаем состояние диалога
     context.user_data['conversation_state'] = AWAIT_SUBMIT_RESULT
 
-    # Отправляем сообщение в личный чат пользователя
     await update.effective_user.send_message(
         "Введите результат:\n"
         "- если это повторения, просто число (например, 10)\n"
@@ -41,11 +38,10 @@ async def submit_complex_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def submit_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода результата."""
-    print("=== submit_result_input: ВЫЗОВ ===")
+    print("=== submit_result_input: ВХОД ===")
 
-    # Проверяем, что мы находимся в нужном состоянии
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_RESULT:
-        print(f"Состояние не соответствует. Текущее состояние: {context.user_data.get('conversation_state')}")
+        print(f"Состояние не соответствует: {context.user_data.get('conversation_state')}")
         return
 
     user_input = update.message.text.strip()
@@ -54,7 +50,7 @@ async def submit_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if entity_type != 'complex':
         await update.message.reply_text("Пока поддерживаются только комплексы.")
-        context.user_data.pop('conversation_state', None)  # Очищаем состояние
+        context.user_data.pop('conversation_state', None)
         return
 
     complex_data = get_complex_by_id(entity_id)
@@ -63,30 +59,28 @@ async def submit_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('conversation_state', None)
         return
 
-    metric_type = complex_data[3]  # 'for_time' или 'for_reps'
+    metric_type = complex_data[3]
 
     if metric_type == 'for_reps':
         if not user_input.isdigit():
             await update.message.reply_text("Введите целое число повторений.")
-            return  # остаёмся в том же состоянии
+            return
         context.user_data['submit_result'] = user_input
-    else:  # for_time
+    else:
         if not re.match(r'^\d{1,2}:\d{2}$', user_input):
             await update.message.reply_text("Введите время в формате ММ:СС, например 05:30.")
             return
         context.user_data['submit_result'] = user_input
 
-    # Переходим к следующему шагу
     context.user_data['conversation_state'] = AWAIT_SUBMIT_VIDEO
     await update.message.reply_text("Теперь отправьте ссылку на видео (YouTube, Google Drive и т.п.):")
 
 
 async def submit_video_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода ссылки на видео."""
-    print("=== submit_video_input: ВЫЗОВ ===")
+    print("=== submit_video_input: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_VIDEO:
-        print(f"Состояние не соответствует. Текущее состояние: {context.user_data.get('conversation_state')}")
         return
 
     video_link = update.message.text.strip()
@@ -101,10 +95,9 @@ async def submit_video_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def submit_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода комментария."""
-    print("=== submit_comment_input: ВЫЗОВ ===")
+    print("=== submit_comment_input: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_COMMENT:
-        print(f"Состояние не соответствует. Текущее состояние: {context.user_data.get('conversation_state')}")
         return
 
     comment = update.message.text
@@ -114,11 +107,10 @@ async def submit_comment_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def submit_comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пропуск комментария (обработчик команды /skip)."""
-    print("=== submit_comment_skip: ВЫЗОВ ===")
+    """Пропуск комментария."""
+    print("=== submit_comment_skip: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_COMMENT:
-        print(f"Состояние не соответствует. Текущее состояние: {context.user_data.get('conversation_state')}")
         return
 
     await finalize_submit(update, context, None)
@@ -134,7 +126,6 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
     channel_post_id = context.user_data.get('submit_channel_post_id')
     channel_id = context.user_data.get('submit_channel_id')
 
-    # Получаем имя пользователя
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("SELECT first_name, username FROM users WHERE user_id = ?", (user_id,))
@@ -142,21 +133,31 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
     conn.close()
     user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
 
-    # Формируем сообщение для публикации в канале
     publish_text = f"✅ **{user_name}** сдал результат: {result_value}\n"
     publish_text += f"📹 Видео: {video_link}\n"
     if comment:
         publish_text += f"💬 {comment}\n"
 
     bot = context.bot
-    await bot.send_message(
+
+    # Отправляем сообщение в канал
+    sent = await bot.send_message(
         chat_id=channel_id,
         text=publish_text,
         parse_mode='Markdown',
         reply_to_message_id=channel_post_id
     )
 
-    await update.message.reply_text("✅ Ваш результат сохранён и опубликован в канале!")
+    # Добавляем кнопку "Комментировать"
+    comment_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Комментировать", callback_data=f"comment_{sent.message_id}")]
+    ])
 
-    # Очищаем все данные диалога
+    await bot.edit_message_reply_markup(
+        chat_id=channel_id,
+        message_id=sent.message_id,
+        reply_markup=comment_keyboard
+    )
+
+    await update.message.reply_text("✅ Ваш результат сохранён и опубликован в канале!")
     context.user_data.clear()
