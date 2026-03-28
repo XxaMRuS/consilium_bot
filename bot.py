@@ -1147,7 +1147,6 @@ async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ДИАЛОГ СДАЧИ РЕЗУЛЬТАТА (без ConversationHandler) ==========
 async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает текстовые сообщения в зависимости от состояния диалога."""
-    print("=== catch_all_text: сообщение получено ===")
     if not update.message or not update.message.text:
         return
 
@@ -1157,7 +1156,6 @@ async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     state = context.user_data.get('conversation_state')
-    print(f"ПЕРЕХВАТ: сообщение '{update.message.text}', state={state}")
     if state == 60:
         await submit_result_input(update, context)
     elif state == 61:

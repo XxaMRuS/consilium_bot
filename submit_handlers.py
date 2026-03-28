@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 async def submit_complex_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатия кнопки 'Сдать результат' в канале."""
-    print("=== submit_complex_callback НАЧАЛО ===")
     query = update.callback_query
     await query.answer()
 
@@ -33,16 +32,12 @@ async def submit_complex_callback(update: Update, context: ContextTypes.DEFAULT_
         "- если время, в формате ММ:СС (например, 05:30)"
     )
 
-    print(f"=== submit_complex_callback завершён, состояние = {context.user_data.get('conversation_state')} ===")
 
 
 async def submit_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода результата."""
-    print("=== submit_result_input: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_RESULT:
-        print(f"Состояние не соответствует: {context.user_data.get('conversation_state')}")
-        return
 
     user_input = update.message.text.strip()
     entity_type = context.user_data.get('submit_entity_type')
@@ -78,7 +73,6 @@ async def submit_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def submit_video_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода ссылки на видео."""
-    print("=== submit_video_input: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_VIDEO:
         return
@@ -95,7 +89,6 @@ async def submit_video_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def submit_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ввода комментария."""
-    print("=== submit_comment_input: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_COMMENT:
         return
@@ -108,7 +101,6 @@ async def submit_comment_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def submit_comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Пропуск комментария."""
-    print("=== submit_comment_skip: ВХОД ===")
 
     if context.user_data.get('conversation_state') != AWAIT_SUBMIT_COMMENT:
         return
@@ -118,6 +110,12 @@ async def submit_comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, comment):
     """Публикация результата в канале."""
+    import re
+    def escape_markdown(text):
+        """Экранирует специальные символы Markdown."""
+        chars = r'_*[]()~`>#+-=|{}.!'
+        return ''.join(f'\\{c}' if c in chars else c for c in text)
+
     user_id = update.effective_user.id
     entity_type = context.user_data.get('submit_entity_type')
     entity_id = context.user_data.get('submit_entity_id')
@@ -133,18 +131,22 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
     conn.close()
     user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
 
-    publish_text = f"✅ **{user_name}** сдал результат: {result_value}\n"
+    # Экранируем текст
+    user_name_clean = escape_markdown(user_name)
+    result_value_clean = escape_markdown(str(result_value))
+    comment_clean = escape_markdown(comment) if comment else ''
+
+    publish_text = f"✅ **{user_name_clean}** сдал результат: {result_value_clean}\n"
     publish_text += f"📹 Видео: {video_link}\n"
     if comment:
-        publish_text += f"💬 {comment}\n"
+        publish_text += f"💬 {comment_clean}\n"
 
     bot = context.bot
 
-    # Отправляем сообщение в канал
+    # Отправляем сообщение в канал (без Markdown)
     sent = await bot.send_message(
         chat_id=channel_id,
         text=publish_text,
-        parse_mode='Markdown',
         reply_to_message_id=channel_post_id
     )
 
