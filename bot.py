@@ -780,6 +780,133 @@ async def delete_complex_command(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(f"Вы уверены, что хотите удалить комплекс '{complex_data[1]}' (ID {complex_id})? Отправьте 'ДА' для подтверждения.")
     return CONFIRM_DELETE_COMPLEX
 
+async def edit_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало редактирования комплекса."""
+    logger.info("edit_complex_command вызвана")
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /editcomplex <id>")
+        return
+    try:
+        complex_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом.")
+        return
+
+    complex_data = get_complex_by_id(complex_id)
+    if not complex_data:
+        await update.message.reply_text("Комплекс с таким ID не найден.")
+        return
+
+    context.user_data['edit_complex_id'] = complex_id
+    keyboard = [
+        [InlineKeyboardButton("Название", callback_data="cfield_name")],
+        [InlineKeyboardButton("Описание", callback_data="cfield_description")],
+        [InlineKeyboardButton("Тип (for_time/for_reps)", callback_data="cfield_type")],
+        [InlineKeyboardButton("Баллы", callback_data="cfield_points")],
+        [InlineKeyboardButton("Добавить упражнение", callback_data="cfield_add_ex")],
+        [InlineKeyboardButton("Удалить упражнение", callback_data="cfield_remove_ex")],
+        [InlineKeyboardButton("Отмена", callback_data="cancel_edit")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"Выберите поле для редактирования комплекса '{complex_data[1]}' (ID {complex_id}):",
+        reply_markup=reply_markup
+    )
+    return EDIT_COMPLEX_ID
+
+async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора поля для редактирования."""
+    logger.info("edit_complex_field_callback вызвана")
+    query = update.callback_query
+    logger.info(f"edit_complex_field_callback с data = {query.data}")
+    await query.answer()
+
+    if query.data == "cancel_edit":
+        await query.edit_message_text("Редактирование отменено.")
+        return ConversationHandler.END
+
+    field_map = {
+        "cfield_name": "name",
+        "cfield_description": "description",
+        "cfield_type": "type",
+        "cfield_points": "points",
+    }
+    field = field_map.get(query.data)
+    if field:
+        context.user_data['edit_complex_field'] = field
+        await query.edit_message_text(f"Введите новое значение для поля {field}:")
+        return EDIT_COMPLEX_VALUE
+    elif query.data == "cfield_add_ex":
+        await query.edit_message_text("Введите ID упражнения и количество повторений через пробел, например: 5 10")
+        context.user_data['edit_complex_action'] = 'add_ex'
+        return EDIT_COMPLEX_VALUE
+    elif query.data == "cfield_remove_ex":
+        await query.edit_message_text("Введите ID упражнения, которое нужно удалить из комплекса:")
+        context.user_data['edit_complex_action'] = 'remove_ex'
+        return EDIT_COMPLEX_VALUE
+    else:
+        await query.edit_message_text("Неизвестное поле.")
+        return ConversationHandler.END
+
+async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода нового значения."""
+    text = update.message.text.strip()
+    complex_id = context.user_data.get('edit_complex_id')
+    action = context.user_data.get('edit_complex_action')
+    field = context.user_data.get('edit_complex_field')
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    try:
+        if action == 'add_ex':
+            parts = text.split()
+            if len(parts) != 2:
+                await update.message.reply_text("Нужно указать ID упражнения и количество повторений, например: 5 10")
+                return EDIT_COMPLEX_VALUE
+            ex_id = int(parts[0])
+            reps = int(parts[1])
+            cur.execute("SELECT 1 FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
+            if cur.fetchone():
+                await update.message.reply_text("Это упражнение уже есть в комплексе.")
+            else:
+                cur.execute("INSERT INTO complex_exercises (complex_id, exercise_id, reps, order_index) VALUES (?, ?, ?, (SELECT COALESCE(MAX(order_index),0)+1 FROM complex_exercises WHERE complex_id=?))", (complex_id, ex_id, reps, complex_id))
+                conn.commit()
+                await update.message.reply_text(f"✅ Упражнение {ex_id} добавлено с {reps} повторениями.")
+            context.user_data.pop('edit_complex_action', None)
+            return ConversationHandler.END
+
+        elif action == 'remove_ex':
+            ex_id = int(text)
+            cur.execute("DELETE FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Упражнение {ex_id} удалено из комплекса.")
+            context.user_data.pop('edit_complex_action', None)
+            return ConversationHandler.END
+
+        elif field:
+            if field == "points":
+                value = int(text)
+            else:
+                value = text
+            cur.execute(f"UPDATE complexes SET {field} = ? WHERE id = ?", (value, complex_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
+            context.user_data.pop('edit_complex_field', None)
+            return ConversationHandler.END
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        return ConversationHandler.END
+    finally:
+        conn.close()
+
+    context.user_data.pop('edit_complex_id', None)
+    return ConversationHandler.END
+
 async def confirm_delete_complex(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.upper() == "ДА":
@@ -1097,6 +1224,57 @@ async def top_league_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     for i, (uid, fname, uname, total) in enumerate(leaderboard, 1):
         text += f"{i}. {fname or uname} — {total}\n"
     await query.message.reply_text(text, parse_mode='Markdown')
+
+async def complex_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик пагинации для списка комплексов."""
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split('_')[2])
+    all_complexes = get_all_complexes()
+    complexes, keyboard = paginate(all_complexes, page, per_page=5, prefix='complex_page')
+    text = "🏋️ **Доступные комплексы:**\n\n"
+    for c in complexes:
+        text += f"ID: {c[0]} — **{c[1]}**\n"
+        text += f"   Тип: {'Время' if c[3] == 'for_time' else 'Повторения'}\n"
+        text += f"   Баллы: {c[4]}\n\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик пагинации для списка упражнений."""
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split('_')[2])
+    all_exercises = get_all_exercises()
+    exercises, keyboard = paginate(all_exercises, page, per_page=5, prefix='ex_page')
+    text = "📋 **Список упражнений:**\n\n"
+    for ex in exercises:
+        name = ex[1].replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик пагинации для списка челленджей."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+    page = int(parts[2])
+    status = parts[3] if len(parts) > 3 else 'active'
+    challenges = get_challenges_by_status(status)
+    items, keyboard = paginate(challenges, page, per_page=5, prefix='challenge_page', extra_data=status)
+    text = f"🏆 **Челленджи ({status}):**\n\n"
+    for ch in items:
+        ch_id, name, desc, target_type, target_id, metric, target_value, start_date, end_date, bonus, target_name = ch
+        name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        text += f"**{name}** (ID {ch_id})\n"
+        text += f"Цель: {'упражнение' if target_type == 'exercise' else 'комплекс'} «{target_name}» (ID {target_id})\n"
+        text += f"Норма: {target_value} ({metric})\n"
+        text += f"Период: {start_date} – {end_date}\n"
+        text += f"Бонус: {bonus} баллов\n\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 # ========== АДМИН-КОМАНДЫ ДЛЯ УПРАЖНЕНИЙ ==========
 async def add_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1582,7 +1760,7 @@ def main():
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
 
     # Обработчик всех текстовых сообщений для ручного диалога сдачи результата
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
+    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
 
     # Обработчики колбэков
     app.add_handler(CallbackQueryHandler(button_handler, pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
