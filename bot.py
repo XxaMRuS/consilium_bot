@@ -20,7 +20,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
-
+DEBUG = True
 # Твои локальные модули
 from activity_calendar import calendar_command, calendar_callback
 from menu_handlers import main_menu_keyboard
@@ -47,7 +47,7 @@ from database import (
 from workout_handlers import (
     workout_start, exercise_choice, result_input, video_input,
     workout_cancel, EXERCISE, RESULT, VIDEO, COMMENT,
-    get_current_week, comment_input, comment_skip
+    get_current_week, comment_input, comment_skip, comment_handler
 )
 from submit_handlers import (
     submit_complex_callback, submit_result_input, submit_video_input,
@@ -60,6 +60,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Лог в файл для отладки
+file_handler = logging.FileHandler('bot.log', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
 
 # === КОНСТАНТЫ И СОСТОЯНИЯ ===
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -334,27 +340,24 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         logger.exception(f"Ошибка в sport_callback_handler: {e}")
         await query.message.reply_text("❌ Произошла ошибка. Попробуй позже.")
 
+
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Если user_data ещё не создан, создаём пустой словарь
-        if context.user_data is None:
-            context.user_data = {}
+    if DEBUG:
+        print(f"DEBUG: menu_handler получил: {update.message.text}")
 
-        # Если активен диалог сдачи результата — пропускаем
-        if context.user_data.get('conversation_state') is not None:
-            logger.info("menu_handler пропускает сообщение, так как активен диалог сдачи результата")
-            return
-
-        if not update.message:
-            return
-        # ... остальной код
     # Если активен диалог сдачи результата – не мешаем
     if context.user_data.get('conversation_state') is not None:
-        logger.info("menu_handler пропускает сообщение, так как активен диалог сдачи результата")
+        if DEBUG:
+            print("DEBUG: menu_handler пропускает, активен диалог")
         return
+
     if not update.message:
         return
+
     text = update.message.text
+    if DEBUG:
+        print(f"DEBUG: menu_handler обрабатывает: {text}")
+
     if "Спорт" in text:
         await sport_menu(update, context)
     elif "Фото" in text:
@@ -370,7 +373,8 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await calendar_command(update, context)
     elif "Админ" in text:
         if is_admin(update):
-            await update.message.reply_text("Админ-панель:\n/config — настройки AI\n/addexercise — добавить упражнение\n/listexercises — список упражнений\n/load_exercises — загрузить из JSON")
+            await update.message.reply_text(
+                "Админ-панель:\n/config — настройки AI\n/addexercise — добавить упражнение\n/listexercises — список упражнений\n/load_exercises — загрузить из JSON")
         else:
             await update.message.reply_text("⛔ У вас нет прав на это.")
     else:
@@ -793,133 +797,6 @@ async def delete_complex_command(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(f"Вы уверены, что хотите удалить комплекс '{complex_data[1]}' (ID {complex_id})? Отправьте 'ДА' для подтверждения.")
     return CONFIRM_DELETE_COMPLEX
 
-async def edit_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало редактирования комплекса."""
-    logger.info("edit_complex_command вызвана")
-    if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав.")
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /editcomplex <id>")
-        return
-    try:
-        complex_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("ID должен быть числом.")
-        return
-
-    complex_data = get_complex_by_id(complex_id)
-    if not complex_data:
-        await update.message.reply_text("Комплекс с таким ID не найден.")
-        return
-
-    context.user_data['edit_complex_id'] = complex_id
-    keyboard = [
-        [InlineKeyboardButton("Название", callback_data="cfield_name")],
-        [InlineKeyboardButton("Описание", callback_data="cfield_description")],
-        [InlineKeyboardButton("Тип (for_time/for_reps)", callback_data="cfield_type")],
-        [InlineKeyboardButton("Баллы", callback_data="cfield_points")],
-        [InlineKeyboardButton("Добавить упражнение", callback_data="cfield_add_ex")],
-        [InlineKeyboardButton("Удалить упражнение", callback_data="cfield_remove_ex")],
-        [InlineKeyboardButton("Отмена", callback_data="cancel_edit")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"Выберите поле для редактирования комплекса '{complex_data[1]}' (ID {complex_id}):",
-        reply_markup=reply_markup
-    )
-    return EDIT_COMPLEX_ID
-
-async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора поля для редактирования."""
-    logger.info("edit_complex_field_callback вызвана")
-    query = update.callback_query
-    logger.info(f"edit_complex_field_callback с data = {query.data}")
-    await query.answer()
-
-    if query.data == "cancel_edit":
-        await query.edit_message_text("Редактирование отменено.")
-        return ConversationHandler.END
-
-    field_map = {
-        "cfield_name": "name",
-        "cfield_description": "description",
-        "cfield_type": "type",
-        "cfield_points": "points",
-    }
-    field = field_map.get(query.data)
-    if field:
-        context.user_data['edit_complex_field'] = field
-        await query.edit_message_text(f"Введите новое значение для поля {field}:")
-        return EDIT_COMPLEX_VALUE
-    elif query.data == "cfield_add_ex":
-        await query.edit_message_text("Введите ID упражнения и количество повторений через пробел, например: 5 10")
-        context.user_data['edit_complex_action'] = 'add_ex'
-        return EDIT_COMPLEX_VALUE
-    elif query.data == "cfield_remove_ex":
-        await query.edit_message_text("Введите ID упражнения, которое нужно удалить из комплекса:")
-        context.user_data['edit_complex_action'] = 'remove_ex'
-        return EDIT_COMPLEX_VALUE
-    else:
-        await query.edit_message_text("Неизвестное поле.")
-        return ConversationHandler.END
-
-async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ввода нового значения."""
-    text = update.message.text.strip()
-    complex_id = context.user_data.get('edit_complex_id')
-    action = context.user_data.get('edit_complex_action')
-    field = context.user_data.get('edit_complex_field')
-
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-
-    try:
-        if action == 'add_ex':
-            parts = text.split()
-            if len(parts) != 2:
-                await update.message.reply_text("Нужно указать ID упражнения и количество повторений, например: 5 10")
-                return EDIT_COMPLEX_VALUE
-            ex_id = int(parts[0])
-            reps = int(parts[1])
-            cur.execute("SELECT 1 FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
-            if cur.fetchone():
-                await update.message.reply_text("Это упражнение уже есть в комплексе.")
-            else:
-                cur.execute("INSERT INTO complex_exercises (complex_id, exercise_id, reps, order_index) VALUES (?, ?, ?, (SELECT COALESCE(MAX(order_index),0)+1 FROM complex_exercises WHERE complex_id=?))", (complex_id, ex_id, reps, complex_id))
-                conn.commit()
-                await update.message.reply_text(f"✅ Упражнение {ex_id} добавлено с {reps} повторениями.")
-            context.user_data.pop('edit_complex_action', None)
-            return ConversationHandler.END
-
-        elif action == 'remove_ex':
-            ex_id = int(text)
-            cur.execute("DELETE FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
-            conn.commit()
-            await update.message.reply_text(f"✅ Упражнение {ex_id} удалено из комплекса.")
-            context.user_data.pop('edit_complex_action', None)
-            return ConversationHandler.END
-
-        elif field:
-            if field == "points":
-                value = int(text)
-            else:
-                value = text
-            cur.execute(f"UPDATE complexes SET {field} = ? WHERE id = ?", (value, complex_id))
-            conn.commit()
-            await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
-            context.user_data.pop('edit_complex_field', None)
-            return ConversationHandler.END
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        return ConversationHandler.END
-    finally:
-        conn.close()
-
-    context.user_data.pop('edit_complex_id', None)
-    return ConversationHandler.END
-
 async def confirm_delete_complex(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.upper() == "ДА":
@@ -1101,60 +978,21 @@ async def challenge_bonus_input(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop(key, None)
     return ConversationHandler.END
 
-
-async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Публикует комментарий в канале."""
-    import sqlite3
-    from database import DB_NAME
-
-    comment_text = update.message.text.strip()
-    user_id = update.effective_user.id
-    channel_id = context.user_data.get('comment_target_chat_id')
-    target_message_id = context.user_data.get('comment_target_message_id')
-
-    if not channel_id or not target_message_id:
-        await update.message.reply_text("❌ Ошибка: не удалось определить сообщение для комментария.")
-        context.user_data.pop('comment_state', None)
-        return
-
-    # Получаем имя пользователя
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT first_name, username FROM users WHERE user_id = ?", (user_id,))
-    user_row = cur.fetchone()
-    conn.close()
-    user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
-
-    # Формируем текст комментария
-    comment_text_formatted = f"💬 **{user_name}** комментирует:\n{comment_text}"
-
-    # Отправляем комментарий в канал как ответ на сообщение с результатом
-    await context.bot.send_message(
-        chat_id=channel_id,
-        text=comment_text_formatted,
-        parse_mode='Markdown',
-        reply_to_message_id=target_message_id
-    )
-
-    # Подтверждение пользователю
-    await update.message.reply_text("✅ Ваш комментарий опубликован в канале!")
-
-    # Очищаем состояние
-    context.user_data.pop('comment_state', None)
-    context.user_data.pop('comment_target_chat_id', None)
-    context.user_data.pop('comment_target_message_id', None)
-
 # ========== ДИАЛОГ СДАЧИ РЕЗУЛЬТАТА (без ConversationHandler) ==========
 async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые сообщения в зависимости от состояния диалога."""
+    if DEBUG:
+        print(f"DEBUG: catch_all_text получил: {update.message.text}")
     if not update.message or not update.message.text:
         return
-
-    # Проверяем, не комментарий ли это
-    if context.user_data.get('comment_state') == 'await_comment':
-        await handle_comment(update, context)
+    # Если нет активного диалога — пропускаем
+    if context.user_data.get('conversation_state') is None:
+        if DEBUG:
+            print("DEBUG: диалог не активен, пропускаем")
         return
-
+    # Обработка отмены
+    if update.message.text.endswith('Отмена'):
+        await workout_cancel(update, context)
+        return
     state = context.user_data.get('conversation_state')
     if state == 60:
         await submit_result_input(update, context)
@@ -1286,58 +1124,7 @@ async def top_league_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         text += f"{i}. {fname or uname} — {total}\n"
     await query.message.reply_text(text, parse_mode='Markdown')
 
-async def complex_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик пагинации для списка комплексов."""
-    query = update.callback_query
-    await query.answer()
-    page = int(query.data.split('_')[2])
-    all_complexes = get_all_complexes()
-    complexes, keyboard = paginate(all_complexes, page, per_page=5, prefix='complex_page')
-    text = "🏋️ **Доступные комплексы:**\n\n"
-    for c in complexes:
-        text += f"ID: {c[0]} — **{c[1]}**\n"
-        text += f"   Тип: {'Время' if c[3] == 'for_time' else 'Повторения'}\n"
-        text += f"   Баллы: {c[4]}\n\n"
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик пагинации для списка упражнений."""
-    query = update.callback_query
-    await query.answer()
-    page = int(query.data.split('_')[2])
-    all_exercises = get_all_exercises()
-    exercises, keyboard = paginate(all_exercises, page, per_page=5, prefix='ex_page')
-    text = "📋 **Список упражнений:**\n\n"
-    for ex in exercises:
-        name = ex[1].replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
-        text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-
-async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик пагинации для списка челленджей."""
-    query = update.callback_query
-    await query.answer()
-    parts = query.data.split('_')
-    page = int(parts[2])
-    status = parts[3] if len(parts) > 3 else 'active'
-    challenges = get_challenges_by_status(status)
-    items, keyboard = paginate(challenges, page, per_page=5, prefix='challenge_page', extra_data=status)
-    text = f"🏆 **Челленджи ({status}):**\n\n"
-    for ch in items:
-        ch_id, name, desc, target_type, target_id, metric, target_value, start_date, end_date, bonus, target_name = ch
-        name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
-        target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
-        text += f"**{name}** (ID {ch_id})\n"
-        text += f"Цель: {'упражнение' if target_type == 'exercise' else 'комплекс'} «{target_name}» (ID {target_id})\n"
-        text += f"Норма: {target_value} ({metric})\n"
-        text += f"Период: {start_date} – {end_date}\n"
-        text += f"Бонус: {bonus} баллов\n\n"
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-
-# ========== АДМИН-КОМАНДЫ ДЛЯ УПРАЖНЕНИЙ ==========
+# ========== КОМАНДЫ ДЛЯ УПРАЖНЕНИЙ ==========
 async def add_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
@@ -1677,24 +1464,203 @@ init_db()
 backup_database()
 Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthCheckHandler).serve_forever(), daemon=True).start()
 
-
-async def comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатия кнопки 'Комментировать'."""
+async def complex_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    page = int(query.data.split('_')[2])
+    all_complexes = get_all_complexes()
+    complexes, keyboard = paginate(all_complexes, page, per_page=5, prefix='complex_page')
+    text = "🏋️ **Доступные комплексы:**\n\n"
+    for c in complexes:
+        text += f"ID: {c[0]} — **{c[1]}**\n"
+        text += f"   Тип: {'Время' if c[3] == 'for_time' else 'Повторения'}\n"
+        text += f"   Баллы: {c[4]}\n\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-    # Получаем ID сообщения, под которым нажали кнопку
-    message_id = int(query.data.split('_')[1])
+async def edit_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("edit_complex_command вызвана")
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /editcomplex <id>")
+        return
+    try:
+        complex_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом.")
+        return
 
-    # Сохраняем данные в user_data
-    context.user_data['comment_target_chat_id'] = query.message.chat_id
-    context.user_data['comment_target_message_id'] = message_id
-    context.user_data['comment_state'] = 'await_comment'
+    complex_data = get_complex_by_id(complex_id)
+    if not complex_data:
+        await update.message.reply_text("Комплекс с таким ID не найден.")
+        return
 
-    # Отправляем сообщение в личный чат пользователя
-    await update.effective_user.send_message(
-        "✏️ Напишите ваш комментарий к этому результату.\n\n"
-        "Комментарий будет опубликован в канале под сообщением с результатом."
+    context.user_data['edit_complex_id'] = complex_id
+    keyboard = [
+        [InlineKeyboardButton("Название", callback_data="cfield_name")],
+        [InlineKeyboardButton("Описание", callback_data="cfield_description")],
+        [InlineKeyboardButton("Тип (for_time/for_reps)", callback_data="cfield_type")],
+        [InlineKeyboardButton("Баллы", callback_data="cfield_points")],
+        [InlineKeyboardButton("Добавить упражнение", callback_data="cfield_add_ex")],
+        [InlineKeyboardButton("Удалить упражнение", callback_data="cfield_remove_ex")],
+        [InlineKeyboardButton("Отмена", callback_data="cancel_edit")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"Выберите поле для редактирования комплекса '{complex_data[1]}' (ID {complex_id}):",
+        reply_markup=reply_markup
+    )
+    return EDIT_COMPLEX_ID
+
+async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("edit_complex_field_callback вызвана")
+    query = update.callback_query
+    logger.info(f"edit_complex_field_callback с data = {query.data}")
+    await query.answer()
+
+    if query.data == "cancel_edit":
+        await query.edit_message_text("Редактирование отменено.")
+        return ConversationHandler.END
+
+    field_map = {
+        "cfield_name": "name",
+        "cfield_description": "description",
+        "cfield_type": "type",
+        "cfield_points": "points",
+    }
+    field = field_map.get(query.data)
+    if field:
+        context.user_data['edit_complex_field'] = field
+        await query.edit_message_text(f"Введите новое значение для поля {field}:")
+        return EDIT_COMPLEX_VALUE
+    elif query.data == "cfield_add_ex":
+        await query.edit_message_text("Введите ID упражнения и количество повторений через пробел, например: 5 10")
+        context.user_data['edit_complex_action'] = 'add_ex'
+        return EDIT_COMPLEX_VALUE
+    elif query.data == "cfield_remove_ex":
+        await query.edit_message_text("Введите ID упражнения, которое нужно удалить из комплекса:")
+        context.user_data['edit_complex_action'] = 'remove_ex'
+        return EDIT_COMPLEX_VALUE
+    else:
+        await query.edit_message_text("Неизвестное поле.")
+        return ConversationHandler.END
+
+async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    complex_id = context.user_data.get('edit_complex_id')
+    action = context.user_data.get('edit_complex_action')
+    field = context.user_data.get('edit_complex_field')
+
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    try:
+        if action == 'add_ex':
+            parts = text.split()
+            if len(parts) != 2:
+                await update.message.reply_text("Нужно указать ID упражнения и количество повторений, например: 5 10")
+                return EDIT_COMPLEX_VALUE
+            ex_id = int(parts[0])
+            reps = int(parts[1])
+            cur.execute("SELECT 1 FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
+            if cur.fetchone():
+                await update.message.reply_text("Это упражнение уже есть в комплексе.")
+            else:
+                cur.execute("INSERT INTO complex_exercises (complex_id, exercise_id, reps, order_index) VALUES (?, ?, ?, (SELECT COALESCE(MAX(order_index),0)+1 FROM complex_exercises WHERE complex_id=?))", (complex_id, ex_id, reps, complex_id))
+                conn.commit()
+                await update.message.reply_text(f"✅ Упражнение {ex_id} добавлено с {reps} повторениями.")
+            context.user_data.pop('edit_complex_action', None)
+            return ConversationHandler.END
+
+        elif action == 'remove_ex':
+            ex_id = int(text)
+            cur.execute("DELETE FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Упражнение {ex_id} удалено из комплекса.")
+            context.user_data.pop('edit_complex_action', None)
+            return ConversationHandler.END
+
+        elif field:
+            if field == "points":
+                value = int(text)
+            else:
+                value = text
+            cur.execute(f"UPDATE complexes SET {field} = ? WHERE id = ?", (value, complex_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
+            context.user_data.pop('edit_complex_field', None)
+            return ConversationHandler.END
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        return ConversationHandler.END
+    finally:
+        conn.close()
+
+    context.user_data.pop('edit_complex_id', None)
+    return ConversationHandler.END
+
+async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split('_')[2])
+    all_exercises = get_all_exercises()
+    exercises, keyboard = paginate(all_exercises, page, per_page=5, prefix='ex_page')
+    text = "📋 **Список упражнений:**\n\n"
+    for ex in exercises:
+        name = ex[1].replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+    page = int(parts[2])
+    status = parts[3] if len(parts) > 3 else 'active'
+    challenges = get_challenges_by_status(status)
+    items, keyboard = paginate(challenges, page, per_page=5, prefix='challenge_page', extra_data=status)
+    text = f"🏆 **Челленджи ({status}):**\n\n"
+    for ch in items:
+        ch_id, name, desc, target_type, target_id, metric, target_value, start_date, end_date, bonus, target_name = ch
+        name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+        text += f"**{name}** (ID {ch_id})\n"
+        text += f"Цель: {'упражнение' if target_type == 'exercise' else 'комплекс'} «{target_name}» (ID {target_id})\n"
+        text += f"Норма: {target_value} ({metric})\n"
+        text += f"Период: {start_date} – {end_date}\n"
+        text += f"Бонус: {bonus} баллов\n\n"
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def skip_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from workout_handlers import skip_comment_finalize
+    await skip_comment_finalize(update, context)
+
+async def cancel_submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    await query.edit_message_text("❌ Ввод результата отменён.")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает текущее состояние диалога (только для админа)."""
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    user_id = update.effective_user.id
+    state = context.user_data.get('conversation_state')
+    user_data_keys = list(context.user_data.keys())
+    await update.message.reply_text(
+        f"📊 **Состояние диалога**\n\n"
+        f"`conversation_state`: {state}\n"
+        f"`user_data` ключи: {user_data_keys}\n"
+        f"👤 `user_id`: {user_id}\n\n"
+        f"Если нужно больше данных — скажи.",
+        parse_mode='Markdown'
     )
 
 # ========== ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ==========
@@ -1740,9 +1706,21 @@ def main():
     app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
     app.add_handler(CommandHandler("publish_complex", publish_complex_command))
-    app.add_handler(CommandHandler("skip", submit_comment_skip))  # обработчик /skip
-    # Обработчик нажатия кнопки "Комментировать"
-    app.add_handler(CallbackQueryHandler(comment_callback, pattern='^comment_'))
+    app.add_handler(CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'))
+    app.add_handler(CommandHandler("debug", debug_command))
+
+    # Обработчик ошибок
+    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.error(msg="Exception while handling an update:", exc_info=context.error)
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"❌ Ошибка:\n{str(context.error)[:500]}"
+            )
+        except:
+            pass
+
+    app.add_error_handler(error_handler)
 
     # Диалог выполнения комплекса (через команду /complex)
     complex_conv = ConversationHandler(
@@ -1765,8 +1743,7 @@ def main():
             EXERCISE: [CallbackQueryHandler(exercise_choice, pattern='^ex_|^cancel$')],
             RESULT: [MessageHandler(filters.TEXT & ~filters.COMMAND, result_input)],
             VIDEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, video_input)],
-            COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment_input),
-                      CommandHandler('skip', comment_skip)],
+            COMMENT: [MessageHandler(filters.TEXT, comment_handler)],
         },
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     )
@@ -1843,49 +1820,7 @@ def main():
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
 
     # Обработчик всех текстовых сообщений для ручного диалога сдачи результата
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
-
-    async def handle_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Публикует комментарий в канале."""
-        import sqlite3
-        from database import DB_NAME
-
-        comment_text = update.message.text.strip()
-        user_id = update.effective_user.id
-        channel_id = context.user_data.get('comment_target_chat_id')
-        target_message_id = context.user_data.get('comment_target_message_id')
-
-        if not channel_id or not target_message_id:
-            await update.message.reply_text("❌ Ошибка: не удалось определить сообщение для комментария.")
-            context.user_data.pop('comment_state', None)
-            return
-
-        # Получаем имя пользователя
-        conn = sqlite3.connect(DB_NAME)
-        cur = conn.cursor()
-        cur.execute("SELECT first_name, username FROM users WHERE user_id = ?", (user_id,))
-        user_row = cur.fetchone()
-        conn.close()
-        user_name = user_row[0] if user_row and user_row[0] else (user_row[1] if user_row else f"User{user_id}")
-
-        # Формируем текст комментария
-        comment_text_formatted = f"💬 **{user_name}** комментирует:\n{comment_text}"
-
-        # Отправляем комментарий в канал как ответ на сообщение с результатом
-        await context.bot.send_message(
-            chat_id=channel_id,
-            text=comment_text_formatted,
-            parse_mode='Markdown',
-            reply_to_message_id=target_message_id
-        )
-
-        # Подтверждение пользователю
-        await update.message.reply_text("✅ Ваш комментарий опубликован в канале!")
-
-        # Очищаем состояние
-        context.user_data.pop('comment_state', None)
-        context.user_data.pop('comment_target_chat_id', None)
-        context.user_data.pop('comment_target_message_id', None)
+    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
 
     # Обработчики колбэков
     app.add_handler(CallbackQueryHandler(button_handler, pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
@@ -1900,6 +1835,7 @@ def main():
     app.add_handler(CallbackQueryHandler(complex_page_callback, pattern='^complex_page_'))
     app.add_handler(CallbackQueryHandler(exercise_page_callback, pattern='^ex_page_'))
     app.add_handler(CallbackQueryHandler(challenge_page_callback, pattern='^challenge_page_'))
+    app.add_handler(CallbackQueryHandler(cancel_submit_callback, pattern='^cancel_submit$'))
 
     # Обработчики сообщений
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
