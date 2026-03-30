@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from notifications import send_record_notification
 from database import (
     add_user, get_exercises, add_workout, get_user_level, get_exercise_by_id,
     get_user_challenges, update_challenge_progress, check_challenge_completion,
@@ -114,7 +113,7 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     bot = update.get_bot()
 
     def notify_record_callback(uid, eid, res, met):
-        asyncio.create_task(send_record_notification(bot, uid, eid, res, met))
+    # asyncio.create_task(send_record_notification(bot, uid, eid, res, met))
 
     _, new_achievements = add_workout(
         user_id=user_id,
