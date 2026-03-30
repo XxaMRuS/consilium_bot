@@ -1,7 +1,6 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from bot import edit_exercise_value_input, edit_challenge_value_input
 
 logger = logging.getLogger(__name__)
 
