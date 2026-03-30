@@ -357,13 +357,16 @@ def get_all_exercises():
     rows = cur.fetchall()
     conn.close()
 
-    # Если description нет (SQLite старая структура), добавляем пустую строку
     result = []
     for row in rows:
         if len(row) == 6:
+            # SQLite вернул 6 полей (без description)
             result.append((row[0], row[1], "", row[2], row[3], row[4], row[5]))
-        else:
+        elif len(row) == 7:
+            # PostgreSQL вернул 7 полей
             result.append(row)
+        else:
+            raise ValueError(f"Неверное количество полей в упражнении: {len(row)}")
     return result
 
 
