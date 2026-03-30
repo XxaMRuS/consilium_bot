@@ -13,7 +13,7 @@ from database import (
 logger = logging.getLogger(__name__)
 
 EXERCISE, RESULT, VIDEO, COMMENT = range(4)
-DEBUG = True  # Включить отладку
+DEBUG = True
 
 def get_current_week():
     return datetime.now().isocalendar()[1]
@@ -112,8 +112,9 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     metric = context.user_data.get('metric')
     bot = update.get_bot()
 
+    # Функция-заглушка для уведомлений (отключена)
     def notify_record_callback(uid, eid, res, met):
-    # asyncio.create_task(send_record_notification(bot, uid, eid, res, met))
+        pass
 
     _, new_achievements = add_workout(
         user_id=user_id,
@@ -135,7 +136,7 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             update_challenge_progress(user_id, ch_id, result_value)
             if check_challenge_completion(user_id, ch_id, ch_target_value, ch_metric):
                 if complete_challenge(user_id, ch_id):
-                    await _send_challenge_completion_notification(update.get_bot(), user_id, ch_id, bonus)
+                    await _send_challenge_completion_notification(bot, user_id, ch_id, bonus)
     await update.message.reply_text("✅ Тренировка успешно записана! Спасибо за честность.\nМожешь посмотреть свои результаты командой /mystats, а таблицу лидеров — /top.")
     context.user_data.clear()
 
@@ -213,18 +214,12 @@ async def skip_comment_finalize(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text("✅ Тренировка сохранена без комментария.")
     context.user_data.clear()
 
-
 async def universal_comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if DEBUG:
         print(f"DEBUG: universal_comment_handler получил: {update.message.text}")
-
     if update.message.text == '/skip':
-        if DEBUG:
-            print("DEBUG: это /skip, вызываем comment_skip")
         await comment_skip(update, context)
     else:
-        if DEBUG:
-            print("DEBUG: это комментарий, вызываем comment_input")
         await comment_input(update, context)
 
 async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
