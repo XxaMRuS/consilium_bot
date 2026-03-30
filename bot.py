@@ -31,7 +31,7 @@ from photo_processor import (
     convert_to_hard_rock, convert_to_pixel, convert_to_neon,
     convert_to_oil, convert_to_watercolor, convert_to_cartoon
 )
-from database_backup import (
+from database import (
     DB_NAME, init_db, add_user, get_exercises, add_workout, add_exercise,
     set_exercise_week, get_user_stats, get_leaderboard,
     get_all_exercises, delete_exercise,
@@ -1102,7 +1102,8 @@ async def challenge_type_callback(update: Update, context: ContextTypes.DEFAULT_
             return ConversationHandler.END
         keyboard = []
         for ex in exercises:
-            ex_id, name, _, _, _, _ = ex
+            ex_id = ex[0]
+            name = ex[1]
             keyboard.append([InlineKeyboardButton(name, callback_data=f"chall_ex_{ex_id}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Выберите упражнение:", reply_markup=reply_markup)
@@ -1115,7 +1116,8 @@ async def challenge_type_callback(update: Update, context: ContextTypes.DEFAULT_
             return ConversationHandler.END
         keyboard = []
         for c in complexes:
-            c_id, name, _, _, _, _, _ = c
+            c_id = c[0]
+            name = c[1]
             keyboard.append([InlineKeyboardButton(name, callback_data=f"chall_cx_{c_id}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Выберите комплекс:", reply_markup=reply_markup)
@@ -1547,8 +1549,22 @@ async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"🏆 **Челленджи ({status}):**\n\n"
     for ch in items:
         ch_id, name, desc, target_type, target_id, metric, target_value, start_date, end_date, bonus, target_name = ch
-        name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
-        target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+
+        # Безопасное преобразование в строку и экранирование Markdown
+        if isinstance(name, str):
+            name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(',
+                                                                                                                r'\(').replace(
+                ')', r'\)')
+        else:
+            name = str(name)
+
+        if isinstance(target_name, str):
+            target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']',
+                                                                                                          r'\]').replace(
+                '(', r'\(').replace(')', r'\)')
+        else:
+            target_name = str(target_name)
+
         text += f"**{name}** (ID {ch_id})\n"
         text += f"Цель: {'упражнение' if target_type == 'exercise' else 'комплекс'} «{target_name}» (ID {target_id})\n"
         text += f"Норма: {target_value} ({metric})\n"
@@ -1735,7 +1751,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def _check_and_recalc(self):
-        from database_backup import get_last_recalc, set_last_recalc
+        from database import get_last_recalc, set_last_recalc
         now = datetime.now()
         last = get_last_recalc()
         if last is None or (now - last).days >= 7:
@@ -2043,6 +2059,7 @@ async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_T
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
+
 async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2054,8 +2071,22 @@ async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_
     text = f"🏆 **Челленджи ({status}):**\n\n"
     for ch in items:
         ch_id, name, desc, target_type, target_id, metric, target_value, start_date, end_date, bonus, target_name = ch
-        name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
-        target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(', r'\(').replace(')', r'\)')
+
+        # Безопасное преобразование в строку и экранирование Markdown
+        if isinstance(name, str):
+            name = name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]').replace('(',
+                                                                                                                r'\(').replace(
+                ')', r'\)')
+        else:
+            name = str(name)
+
+        if isinstance(target_name, str):
+            target_name = target_name.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']',
+                                                                                                          r'\]').replace(
+                '(', r'\(').replace(')', r'\)')
+        else:
+            target_name = str(target_name)
+
         text += f"**{name}** (ID {ch_id})\n"
         text += f"Цель: {'упражнение' if target_type == 'exercise' else 'комплекс'} «{target_name}» (ID {target_id})\n"
         text += f"Норма: {target_value} ({metric})\n"

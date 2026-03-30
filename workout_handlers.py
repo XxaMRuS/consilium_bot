@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from database import (
+from database_backup import (
     add_user, get_exercises, add_workout, get_user_level, get_exercise_by_id,
     get_user_challenges, update_challenge_progress, check_challenge_completion,
     complete_challenge, get_setting, get_challenge_name

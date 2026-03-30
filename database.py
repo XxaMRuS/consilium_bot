@@ -50,16 +50,34 @@ def init_db():
         """)
 
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS exercises (
-                id SERIAL PRIMARY KEY,
-                name TEXT UNIQUE,
-                description TEXT,
-                metric TEXT,
-                points INTEGER,
-                week INTEGER,
-                difficulty TEXT
-            )
-        """)
+                    CREATE TABLE IF NOT EXISTS exercises
+                    (
+                        id
+                        SERIAL
+                        PRIMARY
+                        KEY,
+                        name
+                        TEXT
+                        UNIQUE,
+                        description
+                        TEXT,
+                        metric
+                        TEXT,
+                        points
+                        INTEGER,
+                        week
+                        INTEGER,
+                        difficulty
+                        TEXT
+                    )
+                    """)
+
+        # Добавляем колонку difficulty, если её нет
+        try:
+            cur.execute("SELECT difficulty FROM exercises LIMIT 1")
+        except Exception:
+            cur.execute("ALTER TABLE exercises ADD COLUMN difficulty TEXT DEFAULT 'beginner'")
+            logger.info("Добавлена колонка difficulty")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
@@ -348,7 +366,6 @@ def get_exercises(active_only=True, week=None, difficulty=None):
 
 
 def get_all_exercises():
-    """Возвращает все упражнения (7 полей: id, name, description, metric, points, week, difficulty)"""
     conn = get_connection()
     cur = conn.cursor()
     if IS_POSTGRES:
@@ -356,15 +373,20 @@ def get_all_exercises():
     else:
         cur.execute("SELECT id, name, description, metric, points, week, difficulty FROM exercises ORDER BY id")
     rows = cur.fetchall()
+
+    print(f"DEBUG: rows count = {len(rows)}")
+    if rows:
+        print(f"DEBUG: first row = {rows[0]}")
+        print(f"DEBUG: first row length = {len(rows[0])}")
+
     conn.close()
+    # ... остальной код
 
     result = []
     for row in rows:
         if len(row) == 6:
-            # SQLite вернул 6 полей (без description)
             result.append((row[0], row[1], "", row[2], row[3], row[4], row[5]))
         elif len(row) == 7:
-            # PostgreSQL вернул 7 полей
             result.append(row)
         else:
             raise ValueError(f"Неверное количество полей в упражнении: {len(row)}")

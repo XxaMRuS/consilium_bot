@@ -344,7 +344,7 @@ async def admin_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def admin_exercise_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список упражнений."""
-    from database import get_all_exercises
+    from database_backup import get_all_exercises
     from bot import paginate
 
     query = update.callback_query  # <-- это колбэк
@@ -451,7 +451,7 @@ async def admin_exercise_add_diff(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     diff = query.data.split('_')[2]
 
-    from database import add_exercise
+    from database_backup import add_exercise
 
     success = add_exercise(
         name=context.user_data['ex_name'],
