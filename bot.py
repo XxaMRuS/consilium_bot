@@ -11,7 +11,7 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
 from urllib.parse import urlparse, parse_qs
-
+from admin_handlers import admin_menu, admin_callback
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -54,6 +54,16 @@ from submit_handlers import (
     submit_comment_input, submit_comment_skip
 )
 
+# ========== ТЕСТОВАЯ ФУНКЦИЯ ==========
+async def test_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая функция для проверки вызова из колбэка"""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("✅ Тест: вызвано из кнопки!")
+    else:
+        await update.message.reply_text("✅ Тест: вызвано из команды!")
+    return
+
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -78,6 +88,11 @@ CHALL_NAME, CHALL_DESC, CHALL_TYPE, CHALL_TARGET, CHALL_TARGET_VALUE, CHALL_STAR
 CONFIRM_DELETE = 40
 EDIT_COMPLEX_ID, EDIT_COMPLEX_FIELD, EDIT_COMPLEX_VALUE = range(45, 48)
 CONFIRM_DELETE_COMPLEX = 50
+EDIT_EXERCISE_ID, EDIT_EXERCISE_VALUE = range(55, 57)
+WAIT_DELETE_ID = 41
+WAIT_DELETE_COMPLEX_ID = 42
+WAIT_DELETE_CHALLENGE_ID = 43
+EDIT_CHALLENGE_ID, EDIT_CHALLENGE_VALUE = range(60, 62)
 
 # === УТИЛИТЫ ===
 def clean_markdown(text):
@@ -373,8 +388,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await calendar_command(update, context)
     elif "Админ" in text:
         if is_admin(update):
-            await update.message.reply_text(
-                "Админ-панель:\n/config — настройки AI\n/addexercise — добавить упражнение\n/listexercises — список упражнений\n/load_exercises — загрузить из JSON")
+            await admin_menu(update, context)
         else:
             await update.message.reply_text("⛔ У вас нет прав на это.")
     else:
@@ -509,22 +523,32 @@ async def add_complex_exercise_command(update: Update, context: ContextTypes.DEF
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
+
 async def complexes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page = 1
     if context.args and context.args[0].isdigit():
         page = int(context.args[0])
     all_complexes = get_all_complexes()
     if not all_complexes:
-        await update.message.reply_text("Комплексов пока нет.")
+        if update.callback_query:
+            await update.callback_query.edit_message_text("Комплексов пока нет.")
+        else:
+            await update.message.reply_text("Комплексов пока нет.")
         return
+
     complexes, keyboard = paginate(all_complexes, page, per_page=5, prefix='complex_page')
     text = "🏋️ **Доступные комплексы:**\n\n"
     for c in complexes:
         text += f"ID: {c[0]} — **{c[1]}**\n"
         text += f"   Тип: {'Время' if c[3] == 'for_time' else 'Повторения'}\n"
         text += f"   Баллы: {c[4]}\n\n"
+
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def complex_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -641,10 +665,19 @@ async def save_complex_workout(update: Update, context: ContextTypes.DEFAULT_TYP
 async def newcomplex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("newcomplex_start вызвана")
     if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав.")
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text("⛔ Нет прав.")
+        else:
+            await update.message.reply_text("⛔ Нет прав.")
         return ConversationHandler.END
-    await update.message.reply_text("Введите название комплекса:")
-    logger.info(f"newcomplex_start возвращает {COMPLEX_NAME}")
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите название комплекса:")
+    else:
+        await update.message.reply_text("Введите название комплекса:")
+
     return COMPLEX_NAME
 
 async def complex_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -817,14 +850,223 @@ async def confirm_delete_complex(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('delete_complex_name', None)
     return ConversationHandler.END
 
+
+async def delete_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог удаления челленджа из кнопки."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите ID челленджа для удаления:")
+    else:
+        await update.message.reply_text("Введите ID челленджа для удаления:")
+    return WAIT_DELETE_CHALLENGE_ID
+
+
+async def delete_challenge_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает ID челленджа и запрашивает подтверждение."""
+    try:
+        challenge_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
+        return WAIT_DELETE_CHALLENGE_ID
+
+    challenge = get_challenge_by_id(challenge_id)
+    if not challenge:
+        await update.message.reply_text("Челлендж с таким ID не найден.")
+        return ConversationHandler.END
+
+    context.user_data['delete_challenge_id'] = challenge_id
+    context.user_data['delete_challenge_name'] = challenge[1]
+    await update.message.reply_text(
+        f"Вы уверены, что хотите удалить челлендж '{challenge[1]}' (ID {challenge_id})? Отправьте 'ДА' для подтверждения."
+    )
+    return CONFIRM_DELETE
+
+
+async def confirm_delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение удаления челленджа."""
+    text = update.message.text.strip()
+    if text.upper() == "ДА":
+        challenge_id = context.user_data.get('delete_challenge_id')
+        if challenge_id:
+            conn = sqlite3.connect(DB_NAME)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM user_challenge_progress WHERE challenge_id = ?", (challenge_id,))
+            cur.execute("DELETE FROM user_challenges WHERE challenge_id = ?", (challenge_id,))
+            cur.execute("DELETE FROM challenges WHERE id = ?", (challenge_id,))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text(f"✅ Челлендж ID {challenge_id} удалён.")
+        else:
+            await update.message.reply_text("❌ Не удалось определить ID.")
+    else:
+        await update.message.reply_text("❌ Удаление отменено.")
+    context.user_data.pop('delete_challenge_id', None)
+    context.user_data.pop('delete_challenge_name', None)
+    return ConversationHandler.END
+
+
+async def edit_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог редактирования челленджа."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите ID челленджа:")
+    else:
+        await update.message.reply_text("Введите ID челленджа:")
+    return EDIT_CHALLENGE_ID
+
+
+async def edit_challenge_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает ID челленджа и показывает поля для редактирования."""
+    try:
+        challenge_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
+        return EDIT_CHALLENGE_ID
+
+    challenge = get_challenge_by_id(challenge_id)
+    if not challenge:
+        await update.message.reply_text("Челлендж с таким ID не найден.")
+        return ConversationHandler.END
+
+    context.user_data['edit_challenge_id'] = challenge_id
+    context.user_data['edit_challenge_name'] = challenge[1]
+
+    keyboard = [
+        [InlineKeyboardButton("Название", callback_data="chfield_name")],
+        [InlineKeyboardButton("Описание", callback_data="chfield_description")],
+        [InlineKeyboardButton("Тип цели", callback_data="chfield_target_type")],
+        [InlineKeyboardButton("Целевое значение", callback_data="chfield_target_value")],
+        [InlineKeyboardButton("Дата начала", callback_data="chfield_start_date")],
+        [InlineKeyboardButton("Дата окончания", callback_data="chfield_end_date")],
+        [InlineKeyboardButton("Бонус", callback_data="chfield_bonus")],
+        [InlineKeyboardButton("Отмена", callback_data="cancel_edit_ch")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"Выберите поле для редактирования челленджа '{challenge[1]}' (ID {challenge_id}):",
+        reply_markup=reply_markup
+    )
+    return EDIT_CHALLENGE_VALUE
+
+
+async def edit_challenge_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор поля и ввод нового значения."""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+
+        if data == "cancel_edit_ch":
+            await query.edit_message_text("Редактирование отменено.")
+            return ConversationHandler.END
+
+        field_map = {
+            "chfield_name": "name",
+            "chfield_description": "description",
+            "chfield_target_type": "target_type",
+            "chfield_target_value": "target_value",
+            "chfield_start_date": "start_date",
+            "chfield_end_date": "end_date",
+            "chfield_bonus": "bonus_points",
+        }
+
+        field = field_map.get(data)
+        if field:
+            context.user_data['edit_challenge_field'] = field
+            await query.edit_message_text(f"Введите новое значение для поля {field}:")
+            return EDIT_CHALLENGE_VALUE
+        else:
+            await query.edit_message_text("Неизвестное поле.")
+            return ConversationHandler.END
+    else:
+        # Обработка ввода значения
+        text = update.message.text.strip()
+        challenge_id = context.user_data.get('edit_challenge_id')
+        field = context.user_data.get('edit_challenge_field')
+
+        if not challenge_id or not field:
+            await update.message.reply_text("Ошибка: не найден ID или поле.")
+            return ConversationHandler.END
+
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+
+        try:
+            if field == "bonus_points":
+                value = int(text)
+            else:
+                value = text
+
+            cur.execute(f"UPDATE challenges SET {field} = ? WHERE id = ?", (value, challenge_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+            return EDIT_CHALLENGE_VALUE
+        finally:
+            conn.close()
+
+        context.user_data.pop('edit_challenge_field', None)
+        context.user_data.pop('edit_challenge_id', None)
+        return ConversationHandler.END
+
+
+async def edit_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для редактирования челленджа."""
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    await edit_challenge_start(update, context)
+
+
+async def delete_complex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог удаления комплекса из кнопки."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите ID комплекса для удаления:")
+    else:
+        await update.message.reply_text("Введите ID комплекса для удаления:")
+    return WAIT_DELETE_COMPLEX_ID
+
+
+async def delete_complex_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает ID комплекса и запрашивает подтверждение."""
+    try:
+        complex_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
+        return WAIT_DELETE_COMPLEX_ID
+
+    complex_data = get_complex_by_id(complex_id)
+    if not complex_data:
+        await update.message.reply_text("Комплекс с таким ID не найден.")
+        return ConversationHandler.END
+
+    context.user_data['delete_complex_id'] = complex_id
+    context.user_data['delete_complex_name'] = complex_data[1]
+    await update.message.reply_text(
+        f"Вы уверены, что хотите удалить комплекс '{complex_data[1]}' (ID {complex_id})? Отправьте 'ДА' для подтверждения."
+    )
+    return CONFIRM_DELETE_COMPLEX
+
 # ========== КОНСТРУКТОР ЧЕЛЛЕНДЖЕЙ ==========
 async def addchallenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("addchallenge_start вызвана")
     if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав.")
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text("⛔ Нет прав.")
+        else:
+            await update.message.reply_text("⛔ Нет прав.")
         return ConversationHandler.END
-    await update.message.reply_text("Введите название челленджа:")
-    logger.info(f"addchallenge_start возвращает {CHALL_NAME}")
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите название челленджа:")
+    else:
+        await update.message.reply_text("Введите название челленджа:")
+
     return CHALL_NAME
 
 async def challenge_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1172,6 +1414,45 @@ async def delete_exercise_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(f"Вы уверены, что хотите удалить упражнение '{ex[1]}' (ID {exercise_id})? Отправьте 'ДА' для подтверждения.")
     return CONFIRM_DELETE
 
+async def delete_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог удаления упражнения из кнопки."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Введите ID упражнения для удаления:")
+    else:
+        await update.message.reply_text("Введите ID упражнения для удаления:")
+    return WAIT_DELETE_ID
+
+
+async def delete_exercise_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получает ID упражнения и запрашивает подтверждение."""
+    try:
+        exercise_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
+        return WAIT_DELETE_ID
+
+    async def edit_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.info("edit_exercise_start вызвана")
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text("Введите ID упражнения:")
+        else:
+            await update.message.reply_text("Введите ID упражнения:")
+        logger.info("edit_exercise_start возвращает EDIT_EXERCISE_ID")
+        return EDIT_EXERCISE_ID
+
+    ex = get_exercise_by_id(exercise_id)
+    if not ex:
+        await update.message.reply_text("Упражнение с таким ID не найдено.")
+        return ConversationHandler.END
+
+    context.user_data['delete_exercise_id'] = exercise_id
+    context.user_data['delete_exercise_name'] = ex[1]
+    await update.message.reply_text(
+        f"Вы уверены, что хотите удалить упражнение '{ex[1]}' (ID {exercise_id})? Отправьте 'ДА' для подтверждения.")
+    return CONFIRM_DELETE
+
 async def confirm_delete_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.upper() == "ДА":
@@ -1257,14 +1538,18 @@ async def setlevel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== КОМАНДЫ ДЛЯ ЧЕЛЛЕНДЖЕЙ ==========
 async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = 'active'
-    if context.args and context.args[0] in ('active', 'past', 'future'):
+    if context.args and len(context.args) > 0 and context.args[0] in ('active', 'past', 'future'):
         status = context.args[0]
     challenges = get_challenges_by_status(status)
     if not challenges:
-        await update.message.reply_text(f"Челленджей со статусом '{status}' нет.")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"Челленджей со статусом '{status}' нет.")
+        else:
+            await update.message.reply_text(f"Челленджей со статусом '{status}' нет.")
         return
+
     page = 1
-    if len(context.args) > 1 and context.args[1].isdigit():
+    if context.args and len(context.args) > 1 and context.args[1].isdigit():
         page = int(context.args[1])
     items, keyboard = paginate(challenges, page, per_page=5, prefix='challenge_page', extra_data=status)
     text = f"🏆 **Челленджи ({status}):**\n\n"
@@ -1277,8 +1562,13 @@ async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text += f"Норма: {target_value} ({metric})\n"
         text += f"Период: {start_date} – {end_date}\n"
         text += f"Бонус: {bonus} баллов\n\n"
+
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def join_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1514,7 +1804,9 @@ async def edit_complex_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return EDIT_COMPLEX_ID
 
+
 async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор поля для редактирования."""
     logger.info("edit_complex_field_callback вызвана")
     query = update.callback_query
     logger.info(f"edit_complex_field_callback с data = {query.data}")
@@ -1530,24 +1822,30 @@ async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFA
         "cfield_type": "type",
         "cfield_points": "points",
     }
+
     field = field_map.get(query.data)
     if field:
         context.user_data['edit_complex_field'] = field
         await query.edit_message_text(f"Введите новое значение для поля {field}:")
         return EDIT_COMPLEX_VALUE
+
     elif query.data == "cfield_add_ex":
         await query.edit_message_text("Введите ID упражнения и количество повторений через пробел, например: 5 10")
         context.user_data['edit_complex_action'] = 'add_ex'
         return EDIT_COMPLEX_VALUE
+
     elif query.data == "cfield_remove_ex":
         await query.edit_message_text("Введите ID упражнения, которое нужно удалить из комплекса:")
         context.user_data['edit_complex_action'] = 'remove_ex'
         return EDIT_COMPLEX_VALUE
+
     else:
         await query.edit_message_text("Неизвестное поле.")
         return ConversationHandler.END
 
+
 async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает ввод нового значения."""
     text = update.message.text.strip()
     complex_id = context.user_data.get('edit_complex_id')
     action = context.user_data.get('edit_complex_action')
@@ -1564,11 +1862,18 @@ async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT
                 return EDIT_COMPLEX_VALUE
             ex_id = int(parts[0])
             reps = int(parts[1])
+            # Проверяем, есть ли уже такое упражнение
             cur.execute("SELECT 1 FROM complex_exercises WHERE complex_id = ? AND exercise_id = ?", (complex_id, ex_id))
             if cur.fetchone():
                 await update.message.reply_text("Это упражнение уже есть в комплексе.")
             else:
-                cur.execute("INSERT INTO complex_exercises (complex_id, exercise_id, reps, order_index) VALUES (?, ?, ?, (SELECT COALESCE(MAX(order_index),0)+1 FROM complex_exercises WHERE complex_id=?))", (complex_id, ex_id, reps, complex_id))
+                # Добавляем упражнение в комплекс
+                cur.execute("""
+                            INSERT INTO complex_exercises (complex_id, exercise_id, reps, order_index)
+                            VALUES (?, ?, ?, (SELECT COALESCE(MAX(order_index), 0) + 1
+                                              FROM complex_exercises
+                                              WHERE complex_id = ?))
+                            """, (complex_id, ex_id, reps, complex_id))
                 conn.commit()
                 await update.message.reply_text(f"✅ Упражнение {ex_id} добавлено с {reps} повторениями.")
             context.user_data.pop('edit_complex_action', None)
@@ -1584,7 +1889,11 @@ async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT
 
         elif field:
             if field == "points":
-                value = int(text)
+                try:
+                    value = int(text)
+                except ValueError:
+                    await update.message.reply_text("Баллы должны быть числом.")
+                    return EDIT_COMPLEX_VALUE
             else:
                 value = text
             cur.execute(f"UPDATE complexes SET {field} = ? WHERE id = ?", (value, complex_id))
@@ -1601,6 +1910,133 @@ async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT
 
     context.user_data.pop('edit_complex_id', None)
     return ConversationHandler.END
+
+
+async def edit_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает диалог редактирования упражнения."""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Введите ID упражнения:")
+    else:
+        await update.message.reply_text("Введите ID упражнения:")
+    return EDIT_EXERCISE_ID
+
+
+async def edit_exercise_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("edit_exercise_id_input вызвана")
+    try:
+        exercise_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
+        return EDIT_EXERCISE_ID
+
+    ex = get_exercise_by_id(exercise_id)
+    if not ex:
+        await update.message.reply_text("Упражнение с таким ID не найдено.")
+        return ConversationHandler.END
+
+    context.user_data['edit_exercise_id'] = exercise_id
+
+    keyboard = [
+        [InlineKeyboardButton("Название", callback_data="exfield_name")],
+        [InlineKeyboardButton("Описание", callback_data="exfield_description")],
+        [InlineKeyboardButton("Тип (reps/time)", callback_data="exfield_metric")],
+        [InlineKeyboardButton("Баллы", callback_data="exfield_points")],
+        [InlineKeyboardButton("Неделя", callback_data="exfield_week")],
+        [InlineKeyboardButton("Уровень (beginner/pro)", callback_data="exfield_diff")],
+        [InlineKeyboardButton("Отмена", callback_data="cancel_edit_ex")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"Выберите поле для редактирования упражнения '{ex[1]}' (ID {exercise_id}):",
+        reply_markup=reply_markup
+    )
+    logger.info("edit_exercise_id_input возвращает EDIT_EXERCISE_VALUE")
+    return EDIT_EXERCISE_VALUE
+
+
+async def edit_exercise_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("edit_exercise_value_input вызвана")
+    """Обрабатывает выбор поля и ввод нового значения."""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        logger.info(f"edit_exercise_value_input: колбэк data={data}")
+
+        if data == "cancel_edit_ex":
+            await query.edit_message_text("Редактирование отменено.")
+            return ConversationHandler.END
+
+        field_map = {
+            "exfield_name": "name",
+            "exfield_description": "description",
+            "exfield_metric": "metric",
+            "exfield_points": "points",
+            "exfield_week": "week",
+            "exfield_diff": "difficulty",
+        }
+
+        field = field_map.get(data)
+        if field:
+            context.user_data['edit_exercise_field'] = field
+            await query.edit_message_text(f"Введите новое значение для поля {field}:")
+            return EDIT_EXERCISE_VALUE
+        else:
+            await query.edit_message_text("Неизвестное поле.")
+            return ConversationHandler.END
+    else:
+        # Обработка ввода значения
+        text = update.message.text.strip()
+        exercise_id = context.user_data.get('edit_exercise_id')
+        field = context.user_data.get('edit_exercise_field')
+
+        if not exercise_id or not field:
+            await update.message.reply_text("Ошибка: не найден ID или поле.")
+            return ConversationHandler.END
+
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+
+        try:
+            if field == "points":
+                value = int(text)
+            elif field == "week":
+                value = int(text)
+            elif field == "metric":
+                if text not in ('reps', 'time'):
+                    await update.message.reply_text("Тип должен быть 'reps' или 'time'.")
+                    return EDIT_EXERCISE_VALUE
+                value = text
+            elif field == "difficulty":
+                if text not in ('beginner', 'pro'):
+                    await update.message.reply_text("Уровень должен быть 'beginner' или 'pro'.")
+                    return EDIT_EXERCISE_VALUE
+                value = text
+            else:
+                value = text
+
+            cur.execute(f"UPDATE exercises SET {field} = ? WHERE id = ?", (value, exercise_id))
+            conn.commit()
+            await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+            return EDIT_EXERCISE_VALUE
+        finally:
+            conn.close()
+
+        context.user_data.pop('edit_exercise_field', None)
+        context.user_data.pop('edit_exercise_id', None)
+        return ConversationHandler.END
+
+async def edit_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для редактирования упражнения."""
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    await edit_exercise_start(update, context)
 
 async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1671,7 +2107,7 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    # Команды
+    # ========== 1. КОМАНДЫ (все должны быть зарегистрированы до обработчиков сообщений) ==========
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("help", help_command))
@@ -1695,34 +2131,71 @@ def main():
     app.add_handler(CommandHandler("join", join_challenge_command))
     app.add_handler(CommandHandler("deletecomplex", delete_complex_command))
     app.add_handler(CommandHandler("myprogress", myprogress_command))
-    app.add_handler(CallbackQueryHandler(complex_page_callback, pattern='^complex_page_'))
-    app.add_handler(CallbackQueryHandler(exercise_page_callback, pattern='^ex_page_'))
-    app.add_handler(CallbackQueryHandler(challenge_page_callback, pattern='^challenge_page_'))
     app.add_handler(CommandHandler("set_channel", set_channel_command))
     app.add_handler(CommandHandler("get_channel", get_channel_command))
     app.add_handler(CommandHandler("get_channel_id", get_channel_id))
     app.add_handler(CommandHandler("mychallenges", my_challenges_command))
-    app.add_handler(CallbackQueryHandler(leave_challenge_callback, pattern='^leave_'))
     app.add_handler(CommandHandler("calendar", calendar_command))
-    app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
     app.add_handler(CommandHandler("publish_complex", publish_complex_command))
-    app.add_handler(CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'))
     app.add_handler(CommandHandler("debug", debug_command))
+    app.add_handler(CommandHandler("newcomplex", newcomplex_start))
+    app.add_handler(CommandHandler("addchallenge", addchallenge_start))
+    app.add_handler(CommandHandler("delexercise", delete_exercise_command))
 
-    # Обработчик ошибок
-    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        logger.error(msg="Exception while handling an update:", exc_info=context.error)
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"❌ Ошибка:\n{str(context.error)[:500]}"
-            )
-        except:
-            pass
+    # ========== 2. ИМПОРТЫ ДЛЯ АДМИНКИ ==========
+    from admin_handlers import (
+        EXERCISE_NAME, EXERCISE_DESC, EXERCISE_METRIC, EXERCISE_POINTS, EXERCISE_WEEK, EXERCISE_DIFF,
+        admin_exercise_add_name, admin_exercise_add_desc, admin_exercise_add_metric,
+        admin_exercise_add_points, admin_exercise_add_week, admin_exercise_add_diff,
+        admin_exercise_add_start, admin_cancel, admin_callback,
+    )
 
-    app.add_error_handler(error_handler)
+    # ========== 3. CONVERSATION HANDLERS ==========
 
-    # Диалог выполнения комплекса (через команду /complex)
+    # 3.0 Диалог редактирования комплекса (ДОЛЖЕН БЫТЬ ПЕРВЫМ)
+    edit_complex_conv = ConversationHandler(
+        entry_points=[CommandHandler('editcomplex', edit_complex_command)],
+        states={
+            EDIT_COMPLEX_ID: [CallbackQueryHandler(edit_complex_field_callback, pattern='^cfield_|cancel_edit')],
+            EDIT_COMPLEX_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_complex_value_input)],
+        },
+        fallbacks=[CommandHandler('cancel', workout_cancel)],
+    )
+    app.add_handler(edit_complex_conv)
+
+    # 3.1 Диалог редактирования упражнения
+    edit_exercise_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('editexercise', edit_exercise_command),
+            CallbackQueryHandler(edit_exercise_start, pattern='^admin_ex_edit$')
+        ],
+        states={
+            EDIT_EXERCISE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_exercise_id_input)],
+            EDIT_EXERCISE_VALUE: [
+                CallbackQueryHandler(edit_exercise_value_input, pattern='^exfield_|cancel_edit_ex'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_exercise_value_input)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', workout_cancel)],
+    )
+    app.add_handler(edit_exercise_conv)
+
+    # 3.2 Диалог добавления упражнения
+    admin_add_exercise_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_exercise_add_start, pattern='^admin_ex_add$')],
+        states={
+            EXERCISE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_exercise_add_name)],
+            EXERCISE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_exercise_add_desc)],
+            EXERCISE_METRIC: [CallbackQueryHandler(admin_exercise_add_metric, pattern='^ex_metric_')],
+            EXERCISE_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_exercise_add_points)],
+            EXERCISE_WEEK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_exercise_add_week)],
+            EXERCISE_DIFF: [CallbackQueryHandler(admin_exercise_add_diff, pattern='^ex_diff_')],
+        },
+        fallbacks=[CommandHandler('cancel', admin_cancel)],
+    )
+    app.add_handler(admin_add_exercise_conv)
+
+    # 3.3 Диалог выполнения комплекса
     complex_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(do_complex_start, pattern='^do_complex_\\d+$')],
         states={
@@ -1736,7 +2209,7 @@ def main():
     )
     app.add_handler(complex_conv)
 
-    # Диалог тренировок
+    # 3.4 Диалог тренировок
     workout_conv = ConversationHandler(
         entry_points=[CommandHandler('wod', workout_start)],
         states={
@@ -1749,9 +2222,12 @@ def main():
     )
     app.add_handler(workout_conv)
 
-    # Диалог конструктора комплексов
+    # 3.5 Диалог конструктора комплексов
     newcomplex_conv = ConversationHandler(
-        entry_points=[CommandHandler('newcomplex', newcomplex_start)],
+        entry_points=[
+            CommandHandler('newcomplex', newcomplex_start),
+            CallbackQueryHandler(newcomplex_start, pattern='^admin_cx_add$')
+        ],
         states={
             COMPLEX_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, complex_name_input)],
             COMPLEX_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, complex_desc_input)],
@@ -1766,9 +2242,12 @@ def main():
     )
     app.add_handler(newcomplex_conv)
 
-    # Диалог челленджа
+    # 3.6 Диалог челленджа
     challenge_conv = ConversationHandler(
-        entry_points=[CommandHandler('addchallenge', addchallenge_start)],
+        entry_points=[
+            CommandHandler('addchallenge', addchallenge_start),
+            CallbackQueryHandler(addchallenge_start, pattern='^admin_ch_add$')
+        ],
         states={
             CHALL_NAME: [MessageHandler(filters.TEXT, challenge_name_input)],
             CHALL_DESC: [MessageHandler(filters.TEXT, challenge_desc_input)],
@@ -1785,45 +2264,71 @@ def main():
     )
     app.add_handler(challenge_conv)
 
-    # Диалог удаления упражнения
+    # 3.7 Диалог удаления упражнения
     confirm_conv = ConversationHandler(
-        entry_points=[CommandHandler('delexercise', delete_exercise_command)],
+        entry_points=[
+            CommandHandler('delexercise', delete_exercise_command),
+            CallbackQueryHandler(delete_exercise_start, pattern='^admin_ex_delete$')
+        ],
         states={
+            WAIT_DELETE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_exercise_get_id)],
             CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_delete_exercise)],
         },
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     )
     app.add_handler(confirm_conv)
 
-    # Диалог редактирования комплекса
-    edit_complex_conv = ConversationHandler(
-        entry_points=[CommandHandler('editcomplex', edit_complex_command)],
-        states={
-            EDIT_COMPLEX_ID: [CallbackQueryHandler(edit_complex_field_callback, pattern='^cfield_|cancel_edit')],
-            EDIT_COMPLEX_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_complex_value_input)],
-        },
-        fallbacks=[CommandHandler('cancel', workout_cancel)],
-    )
-    app.add_handler(edit_complex_conv)
-
-    # Диалог удаления комплекса
+    # 3.8 Диалог удаления комплекса
     delete_complex_conv = ConversationHandler(
-        entry_points=[CommandHandler('deletecomplex', delete_complex_command)],
+        entry_points=[
+            CommandHandler('deletecomplex', delete_complex_command),
+            CallbackQueryHandler(delete_complex_start, pattern='^admin_cx_delete$')
+        ],
         states={
+            WAIT_DELETE_COMPLEX_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_complex_get_id)],
             CONFIRM_DELETE_COMPLEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_delete_complex)],
         },
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     )
     app.add_handler(delete_complex_conv)
 
-    # Обработчик кнопки "Сдать результат" (вне ConversationHandler)
+    # 3.9 Диалог удаления челленджа
+    delete_challenge_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(delete_challenge_start, pattern='^admin_ch_delete$')
+        ],
+        states={
+            WAIT_DELETE_CHALLENGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_challenge_get_id)],
+            CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_delete_challenge)],
+        },
+        fallbacks=[CommandHandler('cancel', workout_cancel)],
+    )
+    app.add_handler(delete_challenge_conv)
+
+    # 3.10 Диалог редактирования челленджа
+    edit_challenge_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('editchallenge', edit_challenge_command),
+            CallbackQueryHandler(edit_challenge_start, pattern='^admin_ch_edit$')
+        ],
+        states={
+            EDIT_CHALLENGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_challenge_id_input)],
+            EDIT_CHALLENGE_VALUE: [
+                CallbackQueryHandler(edit_challenge_value_input, pattern='^chfield_|cancel_edit_ch'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_challenge_value_input)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', workout_cancel)],
+    )
+    app.add_handler(edit_challenge_conv)
+
+    # ========== 4. ADMINS CALLBACK (обрабатывает все остальные админ-кнопки) ==========
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern='^admin_'))
+
+    # ========== 5. ОСТАЛЬНЫЕ CALLBACK HANDLERS ==========
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
-
-    # Обработчик всех текстовых сообщений для ручного диалога сдачи результата
-    # app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
-
-    # Обработчики колбэков
-    app.add_handler(CallbackQueryHandler(button_handler, pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
+    app.add_handler(CallbackQueryHandler(button_handler,
+                                         pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
     app.add_handler(CallbackQueryHandler(config_callback_handler, pattern="^toggle_"))
     app.add_handler(CallbackQueryHandler(setlevel_callback, pattern='^setlevel_'))
     app.add_handler(CallbackQueryHandler(sport_callback_handler, pattern='^sport_|^back_to_main$'))
@@ -1836,16 +2341,35 @@ def main():
     app.add_handler(CallbackQueryHandler(exercise_page_callback, pattern='^ex_page_'))
     app.add_handler(CallbackQueryHandler(challenge_page_callback, pattern='^challenge_page_'))
     app.add_handler(CallbackQueryHandler(cancel_submit_callback, pattern='^cancel_submit$'))
+    app.add_handler(CallbackQueryHandler(leave_challenge_callback, pattern='^leave_'))
+    app.add_handler(CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'))
+    app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
 
-    # Обработчики сообщений
+    # ========== 6. MESSAGE HANDLERS (должны быть последними) ==========
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
-    logger.info("🚀 Бот запущен...")
-    app.run_polling(drop_pending_updates=True)
+    # ========== 7. ОБРАБОТЧИК ОШИБОК ==========
+    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.error(msg="Exception while handling an update:", exc_info=context.error)
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"❌ Ошибка:\n{str(context.error)[:500]}"
+            )
+        except:
+            pass
+
+    app.add_error_handler(error_handler)
+
+    # ========== 8. ЗАПУСК ==========
+    logger.info("MAIN: starting polling")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         logger.exception("Критическая ошибка: %s", e)
+
