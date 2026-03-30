@@ -347,7 +347,7 @@ def get_exercises(active_only=True, week=None, difficulty=None):
 
 
 def get_all_exercises():
-    """Возвращает все упражнения"""
+    """Возвращает все упражнения (7 полей: id, name, description, metric, points, week, difficulty)"""
     conn = get_connection()
     cur = conn.cursor()
     if IS_POSTGRES:
@@ -356,7 +356,15 @@ def get_all_exercises():
         cur.execute("SELECT id, name, description, metric, points, week, difficulty FROM exercises ORDER BY id")
     rows = cur.fetchall()
     conn.close()
-    return rows
+
+    # Если description нет (SQLite старая структура), добавляем пустую строку
+    result = []
+    for row in rows:
+        if len(row) == 6:
+            result.append((row[0], row[1], "", row[2], row[3], row[4], row[5]))
+        else:
+            result.append(row)
+    return result
 
 
 def get_exercise_by_id(exercise_id):
