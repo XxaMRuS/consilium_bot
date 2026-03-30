@@ -61,7 +61,36 @@ def init_db():
             )
         """)
 
+        # Добавляем поле description, если его нет (на случай старой схемы)
         cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'exercises'
+                      AND column_name = 'description'
+                    """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE exercises ADD COLUMN description TEXT")
+            logger.info("Добавлено поле description в таблицу exercises")
+
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS complex_exercises
+                (
+                    id
+                    SERIAL
+                    PRIMARY
+                    KEY,
+                    complex_id
+                    INTEGER,
+                    exercise_id
+                    INTEGER,
+                    reps
+                    INTEGER,
+                    order_index
+                    INTEGER
+                )
+                """)
+
+    cur.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER,
@@ -96,6 +125,8 @@ def init_db():
                 order_index INTEGER
             )
         """)
+
+
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS challenges (
