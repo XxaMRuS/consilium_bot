@@ -3,3 +3,4 @@ requests
 google-generativeai
 python-dotenv
 pillow
+psycopg2-binary
