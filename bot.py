@@ -12,6 +12,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
 from urllib.parse import urlparse, parse_qs
 from admin_handlers import admin_menu, admin_callback
+from config import EMOJI, SEPARATOR, WELCOME_TEXT, format_success, format_error, format_warning
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -30,7 +31,7 @@ from photo_processor import (
     convert_to_hard_rock, convert_to_pixel, convert_to_neon,
     convert_to_oil, convert_to_watercolor, convert_to_cartoon
 )
-from database import (
+from database_backup import (
     DB_NAME, init_db, add_user, get_exercises, add_workout, add_exercise,
     set_exercise_week, get_user_stats, get_leaderboard,
     get_all_exercises, delete_exercise,
@@ -122,9 +123,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "🔥 Привет! Я твой фитнес-помощник и AI-консилиум.\n"
-        "Выбери, что хочешь сделать:",
-        reply_markup=reply_markup
+        WELCOME_TEXT,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,7 +267,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(clean_answer)
     except Exception as e:
         logger.exception("Ошибка в handle_message")
-        await update.message.reply_text("❌ Ошибка при ответе ИИ.")
+        await update.message.reply_text(format_error("Ошибка при ответе ИИ."))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -353,7 +354,7 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.message.delete()
     except Exception as e:
         logger.exception(f"Ошибка в sport_callback_handler: {e}")
-        await query.message.reply_text("❌ Произошла ошибка. Попробуй позже.")
+        await query.message.reply_text(format_error("Произошла ошибка. Попробуй позже."))
 
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,7 +497,7 @@ async def add_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         complex_id = add_complex(name, description, type_, points)
         await update.message.reply_text(f"✅ Комплекс «{name}» создан с ID {complex_id}.\nТеперь добавь упражнения командой /addcomplexexercise {complex_id} <id_упражнения> <повторения>")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(format_error(f"Ошибка: {e}"))
 
 async def add_complex_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -521,7 +522,7 @@ async def add_complex_exercise_command(update: Update, context: ContextTypes.DEF
         add_complex_exercise(complex_id, exercise_id, reps)
         await update.message.reply_text(f"✅ Упражнение «{ex[1]}» добавлено в комплекс {complex_data[1]} с {reps} повторениями.")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(format_error(f"Ошибка: {e}"))
 
 
 async def complexes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -714,7 +715,7 @@ async def complex_points_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     keyboard = []
     for ex in exercises:
-        ex_id, name, _, _, _, _ = ex
+        ex_id, name, description, metric, points_ex, week, difficulty = ex
         keyboard.append([InlineKeyboardButton(name, callback_data=f"addex_{ex_id}")])
     keyboard.append([InlineKeyboardButton("✅ Завершить создание", callback_data="finish_complex")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -800,7 +801,7 @@ async def complex_reps_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     keyboard = []
     for ex in exercises:
-        ex_id2, name, _, _, _, _ = ex
+        ex_id2, name, description, metric, points_ex, week, difficulty = ex
         keyboard.append([InlineKeyboardButton(name, callback_data=f"addex_{ex_id2}")])
     keyboard.append([InlineKeyboardButton("✅ Завершить создание", callback_data="finish_complex")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1002,7 +1003,7 @@ async def edit_challenge_value_input(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {e}")
+            await update.message.reply_text(format_error(f"Ошибка: {e}"))
             return EDIT_CHALLENGE_VALUE
         finally:
             conn.close()
@@ -1213,7 +1214,7 @@ async def challenge_bonus_input(update: Update, context: ContextTypes.DEFAULT_TY
     if success:
         await update.message.reply_text("✅ Челлендж успешно создан!")
     else:
-        await update.message.reply_text("❌ Ошибка при сохранении челленджа.")
+        await update.message.reply_text(format_error("Ошибка при сохранении челленджа."))
 
     for key in ['challenge_name', 'challenge_desc', 'challenge_target_type', 'challenge_target_id',
                 'challenge_metric', 'challenge_target_value', 'challenge_start_date', 'challenge_end_date', 'challenge_bonus']:
@@ -1279,7 +1280,7 @@ async def setlevel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if set_user_level(user_id, level):
         await query.edit_message_text(f"✅ Уровень изменён на «{level}».")
     else:
-        await query.edit_message_text("❌ Ошибка при смене уровня.")
+        await query.edit_message_text(format_error("Ошибка при смене уровня."))
 
 async def exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1387,9 +1388,9 @@ async def add_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYP
         if add_exercise(name, desc, metric, points, week, diff):
             await update.message.reply_text(f"✅ Упражнение '{name}' добавлено.")
         else:
-            await update.message.reply_text("❌ Ошибка добавления.")
+            await update.message.reply_text(format_error("Ошибка добавления."))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка парсинга: {e}")
+        await update.message.reply_text(format_error(f"Ошибка парсинга: {e}"))
 
 async def delete_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -1432,15 +1433,6 @@ async def delete_exercise_get_id(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
         return WAIT_DELETE_ID
 
-    async def edit_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        logger.info("edit_exercise_start вызвана")
-        if update.callback_query:
-            await update.callback_query.answer()
-            await update.callback_query.edit_message_text("Введите ID упражнения:")
-        else:
-            await update.message.reply_text("Введите ID упражнения:")
-        logger.info("edit_exercise_start возвращает EDIT_EXERCISE_ID")
-        return EDIT_EXERCISE_ID
 
     ex = get_exercise_by_id(exercise_id)
     if not ex:
@@ -1461,7 +1453,7 @@ async def confirm_delete_exercise(update: Update, context: ContextTypes.DEFAULT_
             if delete_exercise(exercise_id):
                 await update.message.reply_text(f"✅ Упражнение ID {exercise_id} удалено.")
             else:
-                await update.message.reply_text("❌ Ошибка при удалении.")
+                await update.message.reply_text(format_error("Ошибка при удалении."))
         else:
             await update.message.reply_text("❌ Не удалось определить ID.")
     else:
@@ -1510,7 +1502,7 @@ async def load_exercises_command(update: Update, context: ContextTypes.DEFAULT_T
                 add_exercise(ex['name'], ex.get('description',''), ex['metric'], ex['points'], ex.get('week',0), ex.get('difficulty','beginner'))
         await update.message.reply_text("✅ Загружено.")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(format_error(f"Ошибка: {e}"))
 
 async def recalc_rankings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -1526,7 +1518,7 @@ async def setlevel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if set_user_level(user_id, context.args[0]):
             await update.message.reply_text(f"✅ Уровень изменён на {context.args[0]}.")
         else:
-            await update.message.reply_text("❌ Ошибка при смене уровня.")
+            await update.message.reply_text(format_error("Ошибка при смене уровня."))
     else:
         keyboard = [
             [InlineKeyboardButton("Новичок (beginner)", callback_data="setlevel_beginner")],
@@ -1743,7 +1735,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def _check_and_recalc(self):
-        from database import get_last_recalc, set_last_recalc
+        from database_backup import get_last_recalc, set_last_recalc
         now = datetime.now()
         last = get_last_recalc()
         if last is None or (now - last).days >= 7:
@@ -1903,7 +1895,7 @@ async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT
             return ConversationHandler.END
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(format_error(f"Ошибка: {e}"))
         return ConversationHandler.END
     finally:
         conn.close()
@@ -2022,7 +2014,7 @@ async def edit_exercise_value_input(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(f"✅ Поле {field} обновлено на '{value}'.")
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {e}")
+            await update.message.reply_text(format_error(f"Ошибка: {e}"))
             return EDIT_EXERCISE_VALUE
         finally:
             conn.close()
@@ -2355,7 +2347,7 @@ def main():
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"❌ Ошибка:\n{str(context.error)[:500]}"
+                text=format_error(f"{str(context.error)[:500]}")
             )
         except:
             pass
