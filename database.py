@@ -1132,3 +1132,46 @@ def set_exercise_points(exercise_id, points):
         return False
     finally:
         conn.close()
+
+
+def get_user_stats(user_id, period=None):
+    """Возвращает статистику пользователя (баллы и количество тренировок)"""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Получаем общее количество баллов
+    total_points = get_user_scoreboard_total(user_id)
+
+    # Получаем количество тренировок
+    if period:
+        if IS_POSTGRES:
+            cur.execute("""
+                        SELECT COUNT(*)
+                        FROM workouts
+                        WHERE user_id = %s AND date >= NOW() - INTERVAL '1 %s'
+                        """, (user_id, period))
+        else:
+            cur.execute("""
+                        SELECT COUNT(*)
+                        FROM workouts
+                        WHERE user_id = ? AND date >= datetime('now', '-1 ' || ?)
+                        """, (user_id, period))
+    else:
+        if IS_POSTGRES:
+            cur.execute("SELECT COUNT(*) FROM workouts WHERE user_id = %s", (user_id,))
+        else:
+            cur.execute("SELECT COUNT(*) FROM workouts WHERE user_id = ?", (user_id,))
+
+    workout_count = cur.fetchone()[0]
+    conn.close()
+
+    return total_points, workout_count
+
+def get_leaderboard(period=None, league=None):
+    """Возвращает таблицу лидеров (совместимость со старым кодом)"""
+    return get_leaderboard_from_scoreboard(period or 'total')
+
+
+def get_active_challenges():
+    """Возвращает активные челленджи (совместимость со старым кодом)"""
+    return get_challenges_by_status('active')
