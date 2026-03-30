@@ -1048,3 +1048,53 @@ def recalculate_rankings(period_days=7):
     # Для PostgreSQL этот функционал будет реализован отдельно
     if not IS_POSTGRES:
         logger.info("Рекомендуется настроить пересчёт рейтинга через cron")
+
+
+def get_user_activity_calendar(user_id, year, month):
+    """Возвращает календарь активности пользователя"""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    start_date = f"{year}-{month:02d}-01"
+    # Определяем последний день месяца
+    if month == 12:
+        end_date = f"{year + 1}-01-01"
+    else:
+        end_date = f"{year}-{month + 1:02d}-01"
+
+    if IS_POSTGRES:
+        cur.execute("""
+                    SELECT date, COUNT (*) as workouts
+                    FROM workouts
+                    WHERE user_id = %s
+                      AND date >= %s
+                      AND date
+                        < %s
+                    GROUP BY date
+                    ORDER BY date
+                    """, (user_id, start_date, end_date))
+    else:
+        cur.execute("""
+                    SELECT date, COUNT (*) as workouts
+                    FROM workouts
+                    WHERE user_id = ?
+                      AND date >= ?
+                      AND date
+                        < ?
+                    GROUP BY date
+                    ORDER BY date
+                    """, (user_id, start_date, end_date))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    # Формируем словарь {день: количество тренировок}
+    result = {}
+    for row in rows:
+        if IS_POSTGRES:
+            day = row[0].day
+        else:
+            day = int(row[0].split('-')[2])
+        result[day] = row[1]
+
+    return result
