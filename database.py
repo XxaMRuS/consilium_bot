@@ -1098,3 +1098,37 @@ def get_user_activity_calendar(user_id, year, month):
         result[day] = row[1]
 
     return result
+
+def set_exercise_week(exercise_id, week):
+    """Устанавливает неделю для упражнения"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if IS_POSTGRES:
+            cur.execute("UPDATE exercises SET week = %s WHERE id = %s", (week, exercise_id))
+        else:
+            cur.execute("UPDATE exercises SET week = ? WHERE id = ?", (week, exercise_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка установки недели упражнения: {e}")
+        return False
+    finally:
+        conn.close()
+
+def set_exercise_points(exercise_id, points):
+    """Устанавливает баллы для упражнения"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if IS_POSTGRES:
+            cur.execute("UPDATE exercises SET points = %s WHERE id = %s", (points, exercise_id))
+        else:
+            cur.execute("UPDATE exercises SET points = ? WHERE id = ?", (points, exercise_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка установки баллов упражнения: {e}")
+        return False
+    finally:
+        conn.close()
