@@ -63,3 +63,6 @@ def format_error(text: str) -> str:
 
 def format_warning(text: str) -> str:
     return f"{EMOJI['warning']} **Внимание:** {text}"
+
+# ID канала для уведомлений
+NOTIFICATION_CHANNEL_ID = -1003634185270

@@ -50,34 +50,23 @@ def init_db():
         """)
 
         cur.execute("""
-                    CREATE TABLE IF NOT EXISTS exercises
-                    (
-                        id
-                        SERIAL
-                        PRIMARY
-                        KEY,
-                        name
-                        TEXT
-                        UNIQUE,
-                        description
-                        TEXT,
-                        metric
-                        TEXT,
-                        points
-                        INTEGER,
-                        week
-                        INTEGER,
-                        difficulty
-                        TEXT
-                    )
-                    """)
+            CREATE TABLE IF NOT EXISTS exercises (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE,
+                description TEXT,
+                metric TEXT,
+                points INTEGER,
+                week INTEGER,
+                difficulty TEXT
+            )
+        """)
 
         # Добавляем колонку difficulty, если её нет
         try:
             cur.execute("SELECT difficulty FROM exercises LIMIT 1")
         except Exception:
             cur.execute("ALTER TABLE exercises ADD COLUMN difficulty TEXT DEFAULT 'beginner'")
-            logger.info("Добавлена колонка difficulty")
+            logger.info("Добавлена колонка difficulty в exercises")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
@@ -94,6 +83,13 @@ def init_db():
                 metric TEXT
             )
         """)
+
+        # Добавляем колонку date в workouts, если её нет
+        try:
+            cur.execute("SELECT date FROM workouts LIMIT 1")
+        except Exception:
+            cur.execute("ALTER TABLE workouts ADD COLUMN date TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            logger.info("Добавлена колонка date в workouts")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS complexes (
@@ -114,7 +110,6 @@ def init_db():
                 order_index INTEGER
             )
         """)
-
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS challenges (

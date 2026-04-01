@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 DB_NAME = "workouts.db"
 EXERCISES_JSON = "exercises.json"
 
+def get_db_connection():
+    """Возвращает соединение с базой данных."""
+    return sqlite3.connect(DB_NAME)
+
+
 def backup_database():
     """Создаёт резервную копию базы данных."""
     if os.path.exists(DB_NAME):
@@ -323,7 +328,7 @@ def add_user(user_id, first_name, last_name, username, level='beginner'):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO users (user_id, first_name, last_name, username, level)
+        INSERT OR IGNORE INTO users (id, first_name, last_name, username, level)
         VALUES (?, ?, ?, ?, ?)
     """, (user_id, first_name, last_name, username, level))
     conn.commit()
@@ -333,7 +338,7 @@ def get_user_level(user_id):
     """Возвращает уровень пользователя."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT level FROM users WHERE user_id = ?", (user_id,))
+    cur.execute("SELECT level FROM users WHERE id = ?", (user_id,))
     row = cur.fetchone()
     conn.close()
     return row[0] if row else 'beginner'
@@ -350,7 +355,6 @@ def set_user_level(user_id, new_level):
     return True
 
 def get_exercises(active_only=True, week=None, difficulty=None):
-    """Возвращает список упражнений с фильтрацией."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     query = "SELECT id, name, metric, points, week, difficulty FROM exercises"
@@ -687,13 +691,18 @@ def get_all_complexes():
     return rows
 
 def get_complex_by_id(complex_id):
-    """Возвращает комплекс по ID."""
-    conn = sqlite3.connect(DB_NAME)
+    """Получить комплекс по ID"""
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, description, type, points, week, difficulty FROM complexes WHERE id = ?", (complex_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+    try:
+        cur.execute("SELECT id, name, description, type, points FROM complexes WHERE id = ?", (complex_id,))
+        result = cur.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка get_complex_by_id: {e}")
+        return None
+    finally:
+        conn.close()
 
 def get_complex_exercises(complex_id):
     """Возвращает упражнения комплекса."""

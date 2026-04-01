@@ -9,6 +9,7 @@ from database_backup import (
     get_user_challenges, update_challenge_progress, check_challenge_completion,
     complete_challenge, get_setting, get_challenge_name
 )
+from channel_notifier import notify_exercise_complete
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +19,39 @@ DEBUG = True
 def get_current_week():
     return datetime.now().isocalendar()[1]
 
+
 async def _send_challenge_completion_notification(bot, user_id, challenge_id, bonus):
     if DEBUG:
         print(f"DEBUG: _send_challenge_completion_notification user={user_id}")
+
+    # Получаем имя пользователя
     try:
-        await bot.send_message(chat_id=user_id, text=f"🎉 Поздравляем! Вы завершили челлендж и получили {bonus} бонусных баллов!")
+        user = await bot.get_chat(user_id)
+        user_name = user.first_name or user.username or f"User{user_id}"
+    except Exception:
+        user_name = f"User{user_id}"
+
+    challenge_name = get_challenge_name(challenge_id) or f"Челлендж {challenge_id}"
+
+    # Отправляем в канал красивое уведомление
+    try:
+        from channel_notifier import notify_challenge_complete
+        await notify_challenge_complete(
+            bot=bot,
+            user_name=user_name,
+            challenge_name=challenge_name,
+            days=None,
+            bonus=bonus
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления в канал: {e}")
+
+    # Личное сообщение пользователю
+    try:
+        await bot.send_message(chat_id=user_id,
+                               text=f"🎉 Поздравляем! Вы завершили челлендж «{challenge_name}» и получили {bonus} бонусных баллов!")
     except Exception as e:
         logger.error(f"Ошибка уведомления пользователя {user_id}: {e}")
-    channel_id = get_setting("public_channel")
-    if channel_id:
-        try:
-            channel_id_int = int(channel_id)
-            challenge_name = get_challenge_name(challenge_id)
-            await bot.send_message(chat_id=channel_id_int, text=f"🏆 Пользователь {user_id} завершил челлендж «{challenge_name}» и получил {bonus} бонусных баллов!")
-        except Exception as e:
-            logger.error(f"Ошибка отправки в канал: {e}")
 
 async def workout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if DEBUG:
@@ -46,7 +65,8 @@ async def workout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ex = get_exercise_by_id(ex_id)
         if ex:
             context.user_data['exercise_id'] = ex_id
-            metric = ex[2]
+            # get_exercise_by_id: id, name, description, metric, points, week, difficulty
+            metric = ex[3]
             context.user_data['metric'] = metric
             if metric == 'reps':
                 await update.message.reply_text("🔢 Введи количество повторений (только число):")
@@ -101,6 +121,16 @@ async def exercise_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(prompt)
     return RESULT
 
+
+def _reply_anchor_message(update: Update):
+    """Сообщение, к которому можно reply (есть и у Message, и у CallbackQuery)."""
+    if update.message:
+        return update.message
+    if update.callback_query and update.callback_query.message:
+        return update.callback_query.message
+    return None
+
+
 async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, comment=None):
     if DEBUG:
         print("DEBUG: _finalize_workout вызвана")
@@ -111,6 +141,14 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_level = get_user_level(user_id) or 'beginner'
     metric = context.user_data.get('metric')
     bot = update.get_bot()
+
+    # Получаем название упражнения
+    exercise = get_exercise_by_id(exercise_id)
+    exercise_name = exercise[1] if exercise else f"Упражнение {exercise_id}"
+
+    # Получаем имя пользователя
+    user = update.effective_user
+    user_name = user.first_name or user.username or f"User{user_id}"
 
     # Функция-заглушка для уведомлений (отключена)
     def notify_record_callback(uid, eid, res, met):
@@ -126,9 +164,27 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         metric=metric,
         notify_record_callback=notify_record_callback
     )
+
+    # ОТПРАВКА УВЕДОМЛЕНИЯ В КАНАЛ
+    try:
+        await notify_exercise_complete(
+            bot=bot,
+            user_name=user_name,
+            exercise_name=exercise_name,
+            result=result_value,
+            is_record=False
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления в канал: {e}")
+
+    anchor = _reply_anchor_message(update)
     for ach in new_achievements:
         ach_id, name, desc, cond_type, cond_value, icon = ach
-        await update.message.reply_text(f"{icon} **{name}** — {desc}", parse_mode='Markdown')
+        line = f"{icon} **{name}** — {desc}"
+        if anchor:
+            await anchor.reply_text(line, parse_mode='Markdown')
+        else:
+            await update.get_bot().send_message(chat_id=user_id, text=line, parse_mode='Markdown')
     challenges = get_user_challenges(user_id)
     for ch in challenges:
         ch_id, ch_target_type, ch_target_id, ch_target_value, ch_metric, bonus = ch
@@ -137,7 +193,14 @@ async def _finalize_workout(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             if check_challenge_completion(user_id, ch_id, ch_target_value, ch_metric):
                 if complete_challenge(user_id, ch_id):
                     await _send_challenge_completion_notification(bot, user_id, ch_id, bonus)
-    await update.message.reply_text("✅ Тренировка успешно записана! Спасибо за честность.\nМожешь посмотреть свои результаты командой /mystats, а таблицу лидеров — /top.")
+    done_text = (
+        "✅ Тренировка успешно записана! Спасибо за честность.\n"
+        "Можешь посмотреть свои результаты командой /mystats, а таблицу лидеров — /top."
+    )
+    if anchor:
+        await anchor.reply_text(done_text)
+    else:
+        await update.get_bot().send_message(chat_id=user_id, text=done_text)
     context.user_data.clear()
 
 async def result_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,30 +252,18 @@ async def workout_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if DEBUG:
         print("DEBUG: workout_cancel вызвана")
     context.user_data.clear()
-    await update.message.reply_text("❌ Запись тренировки отменена.")
+    em = update.effective_message
+    if em:
+        await em.reply_text("❌ Запись тренировки отменена.")
     return ConversationHandler.END
 
 async def skip_comment_finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if DEBUG:
         print("DEBUG: skip_comment_finalize вызвана")
     query = update.callback_query
-    user_id = update.effective_user.id
-    exercise_id = context.user_data.get('exercise_id')
-    result_value = context.user_data.get('result_value')
-    video_link = context.user_data.get('video_link')
-    user_level = get_user_level(user_id) or 'beginner'
-    metric = context.user_data.get('metric')
-    _, new_achievements = add_workout(
-        user_id=user_id,
-        exercise_id=exercise_id,
-        result_value=result_value,
-        video_link=video_link,
-        user_level=user_level,
-        comment=None,
-        metric=metric
-    )
+    await query.answer()
     await query.edit_message_text("✅ Тренировка сохранена без комментария.")
-    context.user_data.clear()
+    await _finalize_workout(update, context, comment=None)
 
 async def universal_comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if DEBUG:
