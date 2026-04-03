@@ -25,20 +25,21 @@ async def sport_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_print(f"🔥 menu_handlers: sport_menu: создание Inline-клавиатуры")
 
         keyboard = [
-            [InlineKeyboardButton("📋 Каталог", callback_data='sport_catalog')],
+            [InlineKeyboardButton("📋 Все упражнения", callback_data='sport_catalog')],
             [InlineKeyboardButton("📦 Комплексы", callback_data='sport_complexes')],
             [InlineKeyboardButton("🏆 Челленджи", callback_data='sport_challenges')],
-            [InlineKeyboardButton("✍️ Тренировка", callback_data='sport_wod')],
+            [InlineKeyboardButton("🔥 Тренировка недели", callback_data='sport_wod')],
             [InlineKeyboardButton("📊 Статистика", callback_data='sport_mystats')],
+            [InlineKeyboardButton("🏆 Топы и рекорды", callback_data='public_stats')],  # ← НОВАЯ КНОПКА
             [InlineKeyboardButton("🔄 Уровень", callback_data='sport_setlevel')],
             [InlineKeyboardButton("◀️ Назад", callback_data='back_to_main')]
         ]
 
-        debug_print(
-            f"🔥 menu_handlers: sport_menu: кнопки: Каталог, Комплексы, Челленджи, Тренировка, Статистика, Уровень, Назад")
         debug_print(f"🔥 menu_handlers: sport_menu: отправка сообщения с клавиатурой")
 
-        await update.message.reply_text("🏋️ Спорт:", reply_markup=InlineKeyboardMarkup(keyboard))
+        # ИСПРАВЛЕНО: используем anchor (message или callback_query.message)
+        anchor = update.message if update.message else update.callback_query.message
+        await anchor.reply_text("🏋️ Спорт:", reply_markup=InlineKeyboardMarkup(keyboard))
 
         debug_print(f"🔥 menu_handlers: sport_menu: ВОЗВРАТ")
         return

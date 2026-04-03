@@ -1,7 +1,15 @@
 import os
 import logging
 import asyncio
-from workout_handlers import COMPLEX_EXERCISE
+from workout_handlers import (
+    COMPLEX_EXERCISE,
+    public_stats_menu,
+    public_top_users,
+    public_top_challenges,
+    public_join_challenge,
+    public_my_stats,
+    back_to_public_stats
+)
 import re
 import json
 from functools import wraps
@@ -29,7 +37,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
-
 # ==================== ДЕБАГ-РЕЖИМ ====================
 from debug_utils import debug_print, log_call, log_user_data, DEBUG_MODE
 
@@ -77,7 +84,8 @@ from database import (
 from workout_handlers import (
     workout_start, exercise_choice, result_input, video_input,
     workout_cancel, EXERCISE, RESULT, VIDEO, COMMENT,
-    get_current_week, comment_input, comment_skip, comment_handler, skip_comment_finalize
+    get_current_week, comment_input, comment_skip, comment_handler, skip_comment_finalize,
+    complex_exercise_choice
 )
 from submit_handlers import (
     submit_complex_callback, submit_exercise_callback, submit_challenge_callback,
@@ -813,6 +821,17 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     data = query.data
 
+    # ✅ ОБРАБОТКА ОТМЕНЫ ПРЯМО ЗДЕСЬ
+    if data == "cancel":
+        debug_print(f"🔥 sport_callback_handler: ОТМЕНА!")
+        await query.edit_message_text("❌ Запись тренировки отменена.")
+        context.user_data.clear()
+        # Возвращаем в главное меню
+        await start(update, context)
+        return
+
+    # ... остальной код
+
     debug_print(f"🔥 sport_callback_handler: ВХОД")
     debug_print(f"📨 ПОЛУЧЕН CALLBACK: {data}")
     debug_print(f"📦 user_data: {context.user_data}")
@@ -825,9 +844,9 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == 'sport_catalog':
         debug_print(f"🔥 sport_callback_handler: ветка sport_catalog")
         await catalog_command(update, context)
-    elif data == 'sport_wod':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_wod")
-        await query.edit_message_text("Отправь /wod для записи тренировки")
+        # elif data == 'sport_wod':
+        #     debug_print(f"🔥 sport_callback_handler: ветка sport_wod")
+        #     await workout_start(update, context)
     elif data == 'sport_mystats':
         debug_print(f"🔥 sport_callback_handler: ветка sport_mystats")
         await mystats_command(update, context)
@@ -2848,12 +2867,11 @@ def main():
                 MessageHandler(filters.TEXT, comment_handler),
             ],
             COMPLEX_EXERCISE: [
-                CallbackQueryHandler(workout_cancel, pattern='^cancel_complex$'),
-                CallbackQueryHandler(do_exercise_callback, pattern='^complex_ex_'),
+                CallbackQueryHandler(complex_exercise_choice, pattern='^complex_ex_'),
             ]},
         fallbacks=[
             CommandHandler('cancel', workout_cancel),
-            MessageHandler(filters.Regex('^❌ Отмена$'), workout_cancel),
+            #MessageHandler(filters.Regex('^❌ Отмена$'), workout_cancel),
             MessageHandler(filters.Regex('^(🏋️ Спорт|Спорт)$'), menu_handler),
         ],
     ))
@@ -2919,27 +2937,86 @@ def main():
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
+    # В bot.py, где-то после всех импортов, но перед регистрацией обработчиков
+
+    async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик для кнопки Отмена"""
+        query = update.callback_query
+        await query.answer()
+
+        print(f"🔥🔥🔥 CANCEL_CALLBACK: ОТМЕНА СРАБОТАЛА!")
+
+        # Создаем спортивное меню
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = [
+            [InlineKeyboardButton("📋 Все упражнения", callback_data='sport_catalog')],
+            [InlineKeyboardButton("📦 Комплексы", callback_data='sport_complexes')],
+            [InlineKeyboardButton("🏆 Челленджи", callback_data='sport_challenges')],
+            [InlineKeyboardButton("🔥 Тренировка недели", callback_data='sport_wod')],
+            [InlineKeyboardButton("📊 Статистика", callback_data='sport_mystats')],
+            [InlineKeyboardButton("🔄 Уровень", callback_data='sport_setlevel')],
+            [InlineKeyboardButton("◀️ Назад", callback_data='back_to_main')]
+        ]
+
+        await query.edit_message_text(
+            "🏋️ Спорт:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        context.user_data.clear()
+
     # Callback handlers
+    # ✅ ОБРАБОТЧИК ОТМЕНЫ (ДОЛЖЕН БЫТЬ ПЕРВЫМ!)
+    app.add_handler(CallbackQueryHandler(cancel_callback, pattern='^cancel$'))
+
+    # Админские обработчики
     app.add_handler(CallbackQueryHandler(admin_callback, pattern='^admin_'))
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
     app.add_handler(CallbackQueryHandler(submit_exercise_callback, pattern='^submit_exercise_'))
     app.add_handler(CallbackQueryHandler(submit_challenge_callback, pattern='^submit_challenge_'))
+
+    # Обработчики пропуска и фото
     app.add_handler(CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'))
     app.add_handler(CallbackQueryHandler(button_handler,
                                          pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
+
+    # Настройки и уровень
     app.add_handler(CallbackQueryHandler(config_callback_handler, pattern="^toggle_"))
     app.add_handler(CallbackQueryHandler(setlevel_callback, pattern='^setlevel_'))
+
+    # Тренировка недели (специфичный обработчик)
+    app.add_handler(CallbackQueryHandler(workout_start, pattern='^sport_wod$'))
+
+    # Публичная статистика (Топы и рекорды)
+    app.add_handler(CallbackQueryHandler(public_stats_menu, pattern='^public_stats$'))
+    app.add_handler(CallbackQueryHandler(public_top_users, pattern='^public_stats_top$'))
+    app.add_handler(CallbackQueryHandler(public_top_challenges, pattern='^public_stats_challenges$'))
+    app.add_handler(CallbackQueryHandler(public_join_challenge, pattern='^public_join_challenge_'))
+    app.add_handler(CallbackQueryHandler(public_my_stats, pattern='^public_stats_my$'))
+    app.add_handler(CallbackQueryHandler(back_to_public_stats, pattern='^back_to_public_stats$'))
+    app.add_handler(CallbackQueryHandler(sport_menu, pattern='^back_to_sport$'))
+
+    # Основные обработчики спортивного меню
     app.add_handler(CallbackQueryHandler(sport_callback_handler, pattern='^sport_|^back_to_main$'))
     app.add_handler(CallbackQueryHandler(help_callback, pattern='^help_'))
+
+    # Упражнения и статистика
     app.add_handler(CallbackQueryHandler(exercise_callback, pattern='^ex_'))
     app.add_handler(CallbackQueryHandler(record_from_catalog_callback, pattern='^record_'))
     app.add_handler(CallbackQueryHandler(stats_period_callback, pattern='^stats_'))
     app.add_handler(CallbackQueryHandler(top_league_callback, pattern='^top_league_'))
+
+    # Пагинация
     app.add_handler(CallbackQueryHandler(complex_page_callback, pattern='^complex_page_'))
     app.add_handler(CallbackQueryHandler(exercise_page_callback, pattern='^ex_page_'))
     app.add_handler(CallbackQueryHandler(challenge_page_callback, pattern='^challenge_page_'))
+
+    # Отмена и выход
     app.add_handler(CallbackQueryHandler(cancel_submit_callback, pattern='^cancel_submit$'))
     app.add_handler(CallbackQueryHandler(leave_challenge_callback, pattern='^leave_'))
+
+    # Календарь и челленджи
     app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
     app.add_handler(CallbackQueryHandler(join_challenge_callback, pattern='^join_challenge_'))
 

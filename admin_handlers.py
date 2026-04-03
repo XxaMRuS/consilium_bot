@@ -2,10 +2,13 @@ import logging
 import re
 from datetime import datetime
 from functools import wraps
+from database import get_leaderboard_from_scoreboard, get_user_scoreboard_total, get_user_workouts, \
+    get_challenges_by_status
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from database import get_all_exercises, get_setting
 from database_backup import add_exercise
+from ai_work import ENABLED_PROVIDERS
 
 # ==================== ДЕБАГ-РЕЖИМ ====================
 from debug_utils import debug_print, log_call, log_user_data, log_state_change, log_callback, log_message, DEBUG_MODE
@@ -58,6 +61,28 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=reply_markup)
 
     debug_print(f"🔥 admin_menu: ВОЗВРАТ None")
+
+
+@log_call
+async def admin_exercises_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_user_data(update, context, "admin_exercises_menu")
+    debug_print(f"🔥 admin_exercises_menu: вызвана")
+    debug_print(f"🔥 admin_exercises_menu: user_data={context.user_data}")
+    debug_print(f"📦 user_data на входе: {context.user_data if context else 'Нет context'}")
+
+    keyboard = [
+        [InlineKeyboardButton("📋 Список упражнений", callback_data="admin_ex_list")],
+        [InlineKeyboardButton("➕ Добавить упражнение", callback_data="admin_ex_add")],
+        [InlineKeyboardButton("✏️ Редактировать", callback_data="admin_ex_edit")],
+        [InlineKeyboardButton("🗑️ Удалить", callback_data="admin_ex_delete")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="admin_back")],
+    ]
+
+    debug_print(f"🔥 admin_exercises_menu: отправка списка упражнений")
+    await update.callback_query.edit_message_text("🏋️ **Управление упражнениями**", parse_mode='Markdown',
+                                                  reply_markup=InlineKeyboardMarkup(keyboard))
+
+    debug_print(f"🔥 admin_exercises_menu: ВОЗВРАТ None")
 
 
 @log_call
@@ -198,32 +223,62 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
         return
 
+
+
     elif data == "admin_stats_bot":
         debug_print(f"🔥 admin_callback: ветка admin_stats_bot")
-        from bot import config_command
-        await config_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        # Показываем статистику AI (дублируем config_command)
+        keyboard = []
+        for provider, enabled in ENABLED_PROVIDERS.items():
+            status = "✅ ВКЛ" if enabled else "❌ ВЫКЛ"
+            keyboard.append([InlineKeyboardButton(f"{provider} {status}", callback_data=f"toggle_{provider}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(
+            "⚙️ **Настройки консилиума**\nНажми на кнопку, чтобы включить/выключить участника:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         return
+
 
     elif data == "admin_stats_top":
         debug_print(f"🔥 admin_callback: ветка admin_stats_top")
-        from bot import top_command
-        await top_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        leaderboard = get_leaderboard_from_scoreboard()
+        if not leaderboard:
+            await update.callback_query.edit_message_text("Нет данных.")
+            return
+        text = "🏆 **ТОП ИГРОКОВ**\n\n" + "\n".join(
+            [f"{i + 1}. {row[1] or row[2]} — {row[3]} баллов" for i, row in enumerate(leaderboard[:10])])
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
         return
+
 
     elif data == "admin_stats_challenges":
         debug_print(f"🔥 admin_callback: ветка admin_stats_challenges")
-        from bot import challenges_command
-        await challenges_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        challenges = get_challenges_by_status('active')
+        if not challenges:
+            await update.callback_query.edit_message_text("Активных челленджей нет.")
+            return
+        keyboard = []
+        for ch in challenges:
+            ch_id = ch[0]
+            ch_name = ch[1]
+            ch_bonus = ch[9]
+            keyboard.append(
+                [InlineKeyboardButton(f"🏆 {ch_name} (бонус: {ch_bonus})", callback_data=f'join_challenge_{ch_id}')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "🏆 **Активные челленджи:**\n\nВыбери челлендж для участия:"
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
         return
+
 
     elif data == "admin_stats_workouts":
         debug_print(f"🔥 admin_callback: ветка admin_stats_workouts")
-        from bot import mystats_command
-        await mystats_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        user_id = update.effective_user.id
+        total = get_user_scoreboard_total(user_id)
+        workouts = get_user_workouts(user_id, limit=1000)
+        text = f"🏆 **Твоя статистика**\n\n🏋️ Тренировок: {len(workouts)}\n⭐ Баллов: {total}"
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
         return
 
     elif data == "admin_settings_channel":
@@ -232,50 +287,37 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_or_edit(update,
                            f"📢 Текущий канал: {channel if channel else 'не установлен'}\n\nИспользуйте команду `/set_channel <id>`",
                            parse_mode='Markdown')
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
         return
 
     elif data == "admin_settings_ai":
         debug_print(f"🔥 admin_callback: ветка admin_settings_ai")
-        from bot import config_command
-        await config_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        # Показываем настройки AI
+        keyboard = []
+        for provider, enabled in ENABLED_PROVIDERS.items():
+            status = "✅ ВКЛ" if enabled else "❌ ВЫКЛ"
+            keyboard.append([InlineKeyboardButton(f"{provider} {status}", callback_data=f"toggle_{provider}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(
+            "⚙️ **Настройки консилиума**\nНажми на кнопку, чтобы включить/выключить участника:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         return
+
 
     elif data == "admin_settings_recalc":
         debug_print(f"🔥 admin_callback: ветка admin_settings_recalc")
         from bot import recalc_rankings_command
-        await recalc_rankings_command(update, context)
-        debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
+        # Вызываем функцию пересчёта (она не требует update.message)
+        await update.callback_query.edit_message_text("⏳ Начинаю пересчёт рейтинга...")
+        recalculate_rankings(period_days=7)
+        await update.callback_query.edit_message_text("✅ Рейтинг пересчитан.")
         return
-
     else:
         debug_print(f"🔥 admin_callback: неизвестный callback {data}")
         await send_or_edit(update, "⚠️ Раздел в разработке.")
         debug_print(f"🔥 admin_callback: ВОЗВРАТ None")
         return
-
-
-@log_call
-async def admin_exercises_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_user_data(update, context, "admin_exercises_menu")
-    debug_print(f"🔥 admin_exercises_menu: вызвана")
-    debug_print(f"🔥 admin_exercises_menu: user_data={context.user_data}")
-    debug_print(f"📦 user_data на входе: {context.user_data if context else 'Нет context'}")
-
-    keyboard = [
-        [InlineKeyboardButton("📋 Список упражнений", callback_data="admin_ex_list")],
-        [InlineKeyboardButton("➕ Добавить упражнение", callback_data="admin_ex_add")],
-        [InlineKeyboardButton("✏️ Редактировать", callback_data="admin_ex_edit")],
-        [InlineKeyboardButton("🗑️ Удалить", callback_data="admin_ex_delete")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="admin_back")],
-    ]
-
-    debug_print(f"🔥 admin_exercises_menu: отправка списка упражнений")
-    await update.callback_query.edit_message_text("🏋️ **Управление упражнениями**", parse_mode='Markdown',
-                                                  reply_markup=InlineKeyboardMarkup(keyboard))
-
-    debug_print(f"🔥 admin_exercises_menu: ВОЗВРАТ None")
 
 
 @log_call

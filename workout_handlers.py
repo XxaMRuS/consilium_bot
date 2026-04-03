@@ -465,14 +465,17 @@ async def workout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['exercise_id'] = ex_id
             metric = ex[3]
             context.user_data['metric'] = metric
-            cancel_keyboard = ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
+            # ✅ Inline клавиатура с кнопкой отмены
+            cancel_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ])
             if metric == 'reps':
                 await reply_func(
-                    "🔢 Введи количество повторений (только число):\n\n(Чтобы отменить, нажми '❌ Отмена' в главном меню)",
+                    "🔢 Введи количество повторений (только число):\n\n(Чтобы отменить, нажми кнопку ниже)",
                     reply_markup=cancel_keyboard)
             else:
                 await reply_func(
-                    "⏱️ Введи время в формате ММ:СС (например, 05:30):\n\n(Чтобы отменить, нажми '❌ Отмена' в главном меню)",
+                    "⏱️ Введи время в формате ММ:СС (например, 05:30):\n\n(Чтобы отменить, нажми кнопку ниже)",
                     reply_markup=cancel_keyboard)
             debug_print(f"🔥 workout_start: ВОЗВРАТ {RESULT}")
             return RESULT
@@ -509,7 +512,7 @@ async def exercise_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
+    print(f"🔥🔥🔥 exercise_choice ВЫЗВАНА, data={data}")  # ← ДОБАВЬ ЭТУ СТРОКУ
     debug_print(f"🔥 exercise_choice: ВЫЗВАНА, data={data}")
     debug_print(f"🔥 exercise_choice: data={data}")
 
@@ -577,7 +580,12 @@ async def result_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['result_value'] = text
         debug_print(f"🔥 result_input: сохранено result_value={context.user_data.get('result_value')}")
 
-    await update.message.reply_text("📎 Теперь отправь ссылку на видео с выполнением (Google Drive, YouTube и т.п.)")
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+    ])
+    await update.message.reply_text(
+        "📎 Теперь отправь ссылку на видео с выполнением (Google Drive, YouTube и т.п.)\n\n(Чтобы отменить, нажми кнопку ниже)",
+        reply_markup=cancel_keyboard)
     debug_print(f"🔥 result_input: ВОЗВРАТ {VIDEO}")
     return VIDEO
 
@@ -593,7 +601,10 @@ async def video_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return VIDEO
     debug_print(f"🔥 video_input: проверка ссылки прошла")
     context.user_data['video_link'] = video_link
-    keyboard = [[InlineKeyboardButton("⏩ Пропустить", callback_data="skip_comment")]]
+    keyboard = [
+        [InlineKeyboardButton("⏩ Пропустить", callback_data="skip_comment")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("💬 Добавь комментарий (или нажми кнопку):", reply_markup=reply_markup)
     debug_print(f"🔥 video_input: ВОЗВРАТ {COMMENT}")
@@ -672,3 +683,310 @@ async def skip_comment_callback(update: Update, context: ContextTypes.DEFAULT_TY
     """Callback для кнопки пропуска (обёртка)"""
     debug_print(f"🔥 skip_comment_callback: вызвана")
     return await skip_comment_finalize(update, context)
+
+
+@log_call
+async def complex_exercise_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # data имеет формат: complex_ex_{ex_id}_{complex_id}_{reps}
+    parts = data.split("_")
+    ex_id = int(parts[2])
+    complex_id = int(parts[3])
+    reps = int(parts[4])
+
+    # Сохраняем в user_data
+    context.user_data['exercise_id'] = ex_id
+    context.user_data['current_complex_id'] = complex_id
+    context.user_data['complex_reps'] = reps
+
+    # Получаем метрику упражнения
+    exercise = get_exercise_by_id(ex_id)
+    if not exercise:
+        await query.edit_message_text("❌ Упражнение не найдено")
+        return ConversationHandler.END
+
+    metric = exercise[3]
+    context.user_data['metric'] = metric
+
+    # Запрашиваем результат
+    # ✅ Inline клавиатура с кнопкой отмены
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+    ])
+    if metric == 'reps':
+        await query.edit_message_text(
+            "🔢 Введи количество повторений (только число):\n\n(Чтобы отменить, нажми кнопку ниже)",
+            reply_markup=cancel_keyboard)
+    else:
+        await query.edit_message_text(
+            "⏱️ Введи время в формате ММ:СС (например, 05:30):\n\n(Чтобы отменить, нажми кнопку ниже)",
+            reply_markup=cancel_keyboard)
+
+    return RESULT
+
+
+@log_call
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для кнопки Отмена"""
+    query = update.callback_query
+    await query.answer()
+
+    print(f"🔥🔥🔥 CANCEL_CALLBACK: ОТМЕНА СРАБОТАЛА!")
+
+    await query.edit_message_text("❌ Запись тренировки отменена.")
+    context.user_data.clear()
+
+    # Возвращаем в главное меню
+    from menu_handlers import main_menu_keyboard
+    await query.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
+
+
+@log_call
+async def public_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Публичная статистика для обычных пользователей"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_stats_menu: вызвана")
+
+    keyboard = [
+        [InlineKeyboardButton("🏆 Топ пользователей", callback_data="public_stats_top")],
+        [InlineKeyboardButton("🏆 Топ челленджей", callback_data="public_stats_challenges")],
+        [InlineKeyboardButton("📋 Моя статистика", callback_data="public_stats_my")],
+        [InlineKeyboardButton("◀️ Назад в спорт", callback_data="back_to_sport")]
+    ]
+
+    await query.edit_message_text(
+        "📊 **Рейтинги и рекорды**\n\n"
+        "Здесь ты можешь посмотреть:\n"
+        "• Топ активных пользователей\n"
+        "• Самые популярные челленджи\n"
+        "• Свою личную статистику",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def public_top_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать топ пользователей"""
+    query = update.callback_query
+    await query.answer()
+
+    # Используем существующую функцию из admin_handlers, но адаптируем
+    from admin_handlers import show_top_users
+
+    # Вызываем функцию, которая показывает топ пользователей
+    await show_top_users(update, context)
+    # Или скопируй код из admin_stats_top сюда
+
+
+@log_call
+async def public_top_challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать топ челленджей"""
+    query = update.callback_query
+    await query.answer()
+
+    from admin_handlers import show_top_challenges
+    await show_top_challenges(update, context)
+
+
+@log_call
+async def public_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статистику пользователя (используем существующий обработчик)"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_my_stats: вызвана")
+
+    # Меняем callback_data на sport_mystats и передаем в существующий обработчик
+    query.data = 'sport_mystats'
+
+    # Импортируем sport_callback_handler (он есть в bot.py)
+    from bot import sport_callback_handler
+
+    # Вызываем обработчик статистики
+    await sport_callback_handler(update, context)
+
+@log_call
+async def public_top_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать топ пользователей (публичная версия)"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_top_users: вызвана")
+
+    from database import get_leaderboard_from_scoreboard
+
+    leaderboard = get_leaderboard_from_scoreboard()
+    if not leaderboard:
+        await query.edit_message_text("📊 Нет данных о пользователях.")
+        return
+
+    text = "🏆 **ТОП ПОЛЬЗОВАТЕЛЕЙ**\n\n"
+    for i, row in enumerate(leaderboard[:10]):
+        # row[1] - first_name, row[2] - username, row[3] - баллы
+        name = row[1] or row[2] or f"User{row[0]}"
+        text += f"{i + 1}. {name} — {row[3]} баллов\n"
+
+    # Добавляем кнопку "Назад"
+    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_public_stats")]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def public_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Публичная статистика для обычных пользователей"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_stats_menu: вызвана")
+
+    keyboard = [
+        [InlineKeyboardButton("🏆 Топ пользователей", callback_data="public_stats_top")],
+        [InlineKeyboardButton("🏆 Топ челленджей", callback_data="public_stats_challenges")],
+        [InlineKeyboardButton("📋 Моя статистика", callback_data="public_stats_my")],
+        [InlineKeyboardButton("◀️ Назад в спорт", callback_data="back_to_sport")]
+    ]
+
+    await query.edit_message_text(
+        "📊 **Рейтинги и рекорды**\n\n"
+        "Здесь ты можешь посмотреть:\n"
+        "• Топ активных пользователей\n"
+        "• Активные челленджи и присоединиться к ним\n"
+        "• Свою личную статистику",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def public_top_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать топ пользователей (публичная версия)"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_top_users: вызвана")
+
+    from database import get_leaderboard_from_scoreboard
+
+    leaderboard = get_leaderboard_from_scoreboard()
+    if not leaderboard:
+        await query.edit_message_text("📊 Нет данных о пользователях.")
+        return
+
+    text = "🏆 **ТОП ПОЛЬЗОВАТЕЛЕЙ**\n\n"
+    for i, row in enumerate(leaderboard[:10]):
+        # row[1] - first_name, row[2] - username, row[3] - баллы
+        name = row[1] or row[2] or f"User{row[0]}"
+        text += f"{i + 1}. {name} — {row[3]} баллов\n"
+
+    # Добавляем кнопку "Назад"
+    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_public_stats")]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def public_top_challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать активные челленджи с возможностью присоединиться"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_top_challenges: вызвана")
+
+    from database import get_challenges_by_status
+
+    challenges = get_challenges_by_status('active')
+    if not challenges:
+        await query.edit_message_text("📊 Активных челленджей нет.")
+        return
+
+    keyboard = []
+    for ch in challenges:
+        ch_id = ch[0]
+        ch_name = ch[1]
+        ch_bonus = ch[9]
+        keyboard.append([
+            InlineKeyboardButton(f"🏆 {ch_name} (бонус: {ch_bonus})", callback_data=f'public_join_challenge_{ch_id}')
+        ])
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_public_stats")])
+
+    text = "🏆 **Активные челленджи:**\n\nВыбери челлендж для участия:"
+
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def public_join_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Присоединиться к челленджу (публичная версия)"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_join_challenge: вызвана")
+
+    # Извлекаем ID челленджа из callback_data (формат: public_join_challenge_{challenge_id})
+    challenge_id = int(query.data.split('_')[3])
+    user_id = update.effective_user.id
+
+    from database import join_challenge
+
+    success = join_challenge(user_id, challenge_id)
+
+    if success:
+        await query.edit_message_text(f"✅ Вы успешно присоединились к челленджу!")
+    else:
+        await query.edit_message_text(f"❌ Не удалось присоединиться к челленджу. Возможно, вы уже участвуете.")
+
+    # Возвращаемся к списку челленджей через 2 секунды
+    import asyncio
+    await asyncio.sleep(2)
+    await public_top_challenges(update, context)
+
+
+@log_call
+async def public_my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статистику пользователя (упрощенная версия)"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 public_my_stats: вызвана")
+
+    from database import get_user_stats
+
+    user_id = update.effective_user.id
+
+    # Получаем статистику пользователя
+    total_points, workout_count = get_user_stats(user_id)
+
+    text = f"📊 **Твоя статистика**\n\n"
+    text += f"🏆 Всего баллов: {total_points}\n"
+    text += f"💪 Всего тренировок: {workout_count}\n\n"
+    text += f"Продолжай в том же духе! 💪"
+
+    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_public_stats")]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+@log_call
+async def back_to_public_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вернуться в меню публичной статистики"""
+    query = update.callback_query
+    await query.answer()
+    debug_print(f"🔥 back_to_public_stats: вызвана")
+
+    # Возвращаемся в главное меню публичной статистики
+    await public_stats_menu(update, context)
