@@ -1,56 +1,33 @@
 import os
 import logging
 import asyncio
-from workout_handlers import COMPLEX_EXERCISE
 import re
 import json
-from functools import wraps
+from database import init_db
+import threading
+import sqlite3
+import shlex
 from datetime import datetime
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
-
-from database import init_db
-import sqlite3
-import shlex
-
-from admin_handlers import admin_menu, admin_callback, admin_exercise_add_start, admin_cancel, EXERCISE_NAME, \
-    EXERCISE_DESC, EXERCISE_METRIC, EXERCISE_POINTS, EXERCISE_WEEK, EXERCISE_DIFF, admin_exercise_add_name, \
-    admin_exercise_add_desc, admin_exercise_add_metric, admin_exercise_add_points, admin_exercise_add_week, \
-    admin_exercise_add_diff
+from urllib.parse import urlparse, parse_qs
+from admin_handlers import admin_menu, admin_callback, admin_exercise_add_start, admin_cancel, EXERCISE_NAME, EXERCISE_DESC, EXERCISE_METRIC, EXERCISE_POINTS, EXERCISE_WEEK, EXERCISE_DIFF, admin_exercise_add_name, admin_exercise_add_desc, admin_exercise_add_metric, admin_exercise_add_points, admin_exercise_add_week, admin_exercise_add_diff
 from config import EMOJI, SEPARATOR, WELCOME_TEXT, format_success, format_error, format_warning
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import TelegramError
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
 
-# ==================== ДЕБАГ-РЕЖИМ ====================
-from debug_utils import debug_print, log_call, log_user_data, DEBUG_MODE
+DEBUG = True
 
-# Устанавливаем уровень логов
-if DEBUG_MODE:
-    logging.getLogger().setLevel(logging.DEBUG)
-    debug_print("🐞 РЕЖИМ ОТЛАДКИ ВКЛЮЧЕН")
-
-# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-file_handler = logging.FileHandler('bot.log', encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
-# ==================== ИМПОРТЫ ЛОКАЛЬНЫХ МОДУЛЕЙ ====================
+# Твои локальные модули
 from activity_calendar import calendar_command, calendar_callback
 from menu_handlers import main_menu_keyboard, sport_menu
 from ai_work import start_consilium, stats as consilium_stats, ENABLED_PROVIDERS
@@ -72,7 +49,7 @@ from database import (
     update_challenge_progress, check_challenge_completion, get_user_challenges,
     complete_challenge, get_challenges_by_status, get_setting, set_setting, get_challenge_name, leave_challenge,
     get_user_challenges_with_details,
-    check_and_award_achievements, save_published_post, get_published_post_by_message_id, fix_scoreboard_duplicates
+    check_and_award_achievements, save_published_post, get_published_post_by_message_id
 )
 from workout_handlers import (
     workout_start, exercise_choice, result_input, video_input,
@@ -86,7 +63,19 @@ from submit_handlers import (
 )
 from channel_notifier import send_to_channel
 
-# ==================== КОНСТАНТЫ ====================
+# === НАСТРОЙКА ЛОГИРОВАНИЯ ===
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+file_handler = logging.FileHandler('bot.log', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# === КОНСТАНТЫ ===
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_USER_ID", 0))
 
@@ -105,198 +94,38 @@ WAIT_DELETE_CHALLENGE_ID = 43
 EDIT_CHALLENGE_ID, EDIT_CHALLENGE_VALUE = range(60, 62)
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-@log_call
 def clean_markdown(text):
-    debug_print(f"🔥 clean_markdown: ВХОД, text={text[:50] if text else None}")
-    result = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
-    result = re.sub(r'\*(.*?)\*', r'\1', result)
-    result = re.sub(r'__(.*?)__', r'\1', result)
-    result = re.sub(r'`(.*?)`', r'\1', result)
-    debug_print(f"📤 clean_markdown: ВОЗВРАТ {result[:50] if result else None}")
-    return result
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    text = re.sub(r'`(.*?)`', r'\1', text)
+    return text
 
 
-@log_call
 def is_admin(update: Update) -> bool:
-    debug_print(f"🔥 is_admin: ВХОД, user_id={update.effective_user.id if update.effective_user else None}")
-    result = update.effective_user.id == ADMIN_ID
-    debug_print(f"📤 is_admin: ВОЗВРАТ {result}")
-    return result
+    return update.effective_user.id == ADMIN_ID
 
 
-@log_call
 def parse_date(date_str):
-    debug_print(f"🔥 parse_date: ВХОД, date_str={date_str}")
     try:
         day, month, year = date_str.split('.')
-        result = f"{year}-{month}-{day}"
-        debug_print(f"📤 parse_date: ВОЗВРАТ {result}")
-        return result
-    except (ValueError, AttributeError) as e:
-        debug_print(f"❌ parse_date: Ошибка {e}")
+        return f"{year}-{month}-{day}"
+    except (ValueError, AttributeError):
         return None
 
 
-@log_call
-def paginate(items, page, per_page=5, prefix='page', extra_data=''):
-    debug_print(f"🔥 paginate: ВХОД, items_count={len(items) if items else 0}, page={page}")
-    total = len(items)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_items = items[start:end]
-    keyboard = []
-    if page > 1:
-        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"{prefix}_{page - 1}")])
-    if end < total:
-        keyboard.append([InlineKeyboardButton("Вперёд ▶️", callback_data=f"{prefix}_{page + 1}")])
-    debug_print(f"📤 paginate: ВОЗВРАТ {len(page_items)} items, keyboard={len(keyboard)} buttons")
-    return page_items, keyboard
-
-
-@log_call
-def get_exercise_icon(name):
-    return "📌"
-
-
-async def debug_global_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Только ЛОГИРУЕТ, не обрабатывает повторно"""
-    if DEBUG_MODE:
-        print(f"\n{'=' * 60}")
-        print(f"🌍 ГЛОБАЛЬНЫЙ ЛОГ:")
-        if update.callback_query:
-            print(f"   📨 callback_data: {update.callback_query.data}")
-            print(f"   👤 user_id: {update.callback_query.from_user.id}")
-        if update.message:
-            print(f"   💬 текст: {update.message.text}")
-        print(f"{'=' * 60}\n")
-
-    # ❌ НЕ ВЫЗЫВАЕМ ОБРАБОТЧИКИ ЗДЕСЬ!
-    # Просто логируем и возвращаем None
-    return None
-
-    # Передаём управление дальше в основной обработчик
-    # Не возвращаем None, а вызываем соответствующий обработчик
-    if update.callback_query:
-        # Если это callback, передаём в sport_callback_handler
-        from bot import sport_callback_handler
-        await sport_callback_handler(update, context)
-    elif update.message and update.message.text:
-        # Если это текст, передаём в catch_all_text
-        from bot import catch_all_text
-        await catch_all_text(update, context)
-
-    if DEBUG_MODE:
-        print(f"📤 debug_global_handler: ВЫХОД")
-        print(f"{'=' * 60}\n")
-
-
-# ==================== КОМАНДЫ ДЕБАГА ====================
-@log_call
-async def toggle_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Переключает режим отладки (только админ)"""
-    global DEBUG_MODE
-    debug_print(f"🔥 toggle_debug_command: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
-    if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав для переключения режима отладки.")
-        debug_print(f"📤 toggle_debug_command: ВОЗВРАТ (нет прав)")
-        return
-
-    DEBUG_MODE = not DEBUG_MODE
-    status = "✅ ВКЛЮЧЁН" if DEBUG_MODE else "❌ ВЫКЛЮЧЕН"
-
-    set_setting("debug_mode", str(DEBUG_MODE))
-
-    await update.message.reply_text(
-        f"🐞 **Режим отладки {status}**\n\n"
-        f"Теперь {'все действия будут логироваться' if DEBUG_MODE else 'логирование отключено'}.\n\n"
-        f"💡 Логи пишутся в файл `bot.log`",
-        parse_mode='Markdown'
-    )
-
-    logger.info(f"🔧 Режим отладки переключён на {DEBUG_MODE} админом {update.effective_user.id}")
-    debug_print(f"📤 toggle_debug_command: ВОЗВРАТ (новый статус {DEBUG_MODE})")
-
-
-@log_call
-async def toggle_debug_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Кнопка для переключения дебага"""
-    debug_print(f"🔥 toggle_debug_button: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
-    if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 toggle_debug_button: ВОЗВРАТ (нет прав)")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{'🔴 ВЫКЛЮЧИТЬ' if DEBUG_MODE else '🟢 ВКЛЮЧИТЬ'} отладку",
-            callback_data="toggle_debug_callback"
-        )],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_debug")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    current_status = "включён ✅" if DEBUG_MODE else "выключен ❌"
-    await update.message.reply_text(
-        f"🐞 **Режим отладки**\n\nТекущее состояние: {current_status}\n\n"
-        f"Нажми на кнопку, чтобы переключить:",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
-    debug_print(f"📤 toggle_debug_button: ВОЗВРАТ")
-
-
-@log_call
-async def toggle_debug_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback для переключения дебага через кнопку"""
-    global DEBUG_MODE
-    debug_print(f"🔥 toggle_debug_callback_handler: ВХОД")
-
-    query = update.callback_query
-    await query.answer()
-    debug_print(f"📥 Callback data: {query.data}")
-
-    if not is_admin(update):
-        await query.edit_message_text("⛔ Нет прав.")
-        debug_print(f"📤 toggle_debug_callback_handler: ВОЗВРАТ (нет прав)")
-        return
-
-    if query.data == "toggle_debug_callback":
-        DEBUG_MODE = not DEBUG_MODE
-        set_setting("debug_mode", str(DEBUG_MODE))
-        status = "✅ ВКЛЮЧЁН" if DEBUG_MODE else "❌ ВЫКЛЮЧЕН"
-        await query.edit_message_text(f"🐞 Режим отладки {status}", parse_mode='Markdown')
-        logger.info(f"🔧 Дебаг переключён через callback на {DEBUG_MODE}")
-    elif query.data == "cancel_debug":
-        await query.edit_message_text("❌ Отменено.")
-
-    debug_print(f"📤 toggle_debug_callback_handler: ВОЗВРАТ")
-
-
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
-@log_call
+# ========== КОМАНДЫ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 start: ВХОД")
-    debug_print(f"📦 user_data ДО ОЧИСТКИ: {context.user_data}")
-
-    if DEBUG_MODE:
-        text = update.message.text if update.message else 'no message'
-        debug_print(f"📨 start: text={text}")
-
     keyboard = [
         ["🏋️ Спорт", "📸 Фото"],
         ["🤖 Задать вопрос", "❌ Отмена"],
         ["🏆 Рейтинг", "⚙️ Админ"],
-        ["📅 Календарь", "🐞 Отладка"],
+        ["📅 Календарь"],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     em = update.effective_message
     if em:
-        await em.reply_text("✅ Диалог очищен. Вы вернулись в главное меню.", reply_markup=reply_markup,
-                            parse_mode='Markdown')
+        await em.reply_text(WELCOME_TEXT, reply_markup=reply_markup, parse_mode='Markdown')
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -304,14 +133,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode='Markdown',
         )
-    debug_print(f"📤 start: ВОЗВРАТ")
 
 
-@log_call
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 show_menu: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
     keyboard = [
         [InlineKeyboardButton("✏️ Карандаш", callback_data='sketch'),
          InlineKeyboardButton("🎌 Аниме", callback_data='anime')],
@@ -325,13 +149,9 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🎨 Выбери стиль для фото:", reply_markup=reply_markup)
-    debug_print(f"📤 show_menu: ВОЗВРАТ")
 
 
-@log_call
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 stats_command: ВХОД")
-
     text = "📊 **Статистика работы AI:**\n"
     text += f"Всего попыток: {consilium_stats['attempts']}\n"
     text += f"Успешно: {consilium_stats['success']}\n"
@@ -339,26 +159,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for model, count in consilium_stats['models_used'].items():
         text += f"  {model}: {count}\n"
     await update.message.reply_text(text, parse_mode='Markdown')
-    debug_print(f"📤 stats_command: ВОЗВРАТ")
 
 
-@log_call
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 reset_command: ВХОД")
-    debug_print(f"📦 user_data ДО: {context.user_data}")
-
     if 'user_history' in context.user_data:
         context.user_data['user_history'].clear()
     await update.message.reply_text("🔄 История диалога очищена.")
 
-    debug_print(f"📦 user_data ПОСЛЕ: {context.user_data}")
-    debug_print(f"📤 reset_command: ВОЗВРАТ")
 
-
-@log_call
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 help_command: ВХОД")
-
     keyboard = [
         [InlineKeyboardButton("🏋️ Спорт", callback_data='help_sport')],
         [InlineKeyboardButton("📸 Фото", callback_data='help_photo')],
@@ -372,17 +181,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **Помощь**\nВыбери раздел:",
         parse_mode='Markdown', reply_markup=reply_markup
     )
-    debug_print(f"📤 help_command: ВОЗВРАТ")
 
 
-@log_call
 async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Настройка AI"""
-    debug_print(f"🔥 config_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 config_command: ВОЗВРАТ (нет прав)")
         return
     keyboard = []
     for provider, enabled in ENABLED_PROVIDERS.items():
@@ -394,18 +198,13 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
-    debug_print(f"📤 config_command: ВОЗВРАТ")
 
 
-@log_call
 async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 config_callback_handler: ВХОД")
-
     query = update.callback_query
     await query.answer()
     if query.from_user.id != ADMIN_ID:
         await query.edit_message_text("⛔ Недоступно.")
-        debug_print(f"📤 config_callback_handler: ВОЗВРАТ (не админ)")
         return
     provider = query.data.replace("toggle_", "")
     if provider in ENABLED_PROVIDERS:
@@ -420,47 +219,36 @@ async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
-    debug_print(f"📤 config_callback_handler: ВОЗВРАТ")
 
 
-# ==================== ПУБЛИКАЦИЯ В КАНАЛ ====================
-@log_call
 async def publish_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Публикует комплекс в канал с кнопкой 'Сдать результат'."""
-    debug_print(f"🔥 publish_complex_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (нет прав)")
         return
     if not context.args:
         await update.message.reply_text("Использование: /publish_complex <id>")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         complex_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (ошибка ID)")
         return
 
     complex_data = get_complex_by_id(complex_id)
     if not complex_data:
         await update.message.reply_text("Комплекс не найден.")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (комплекс не найден)")
         return
 
     channel_id = get_setting("public_channel")
     if not channel_id:
         await update.message.reply_text("Сначала установите канал командой /set_channel <id>")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (нет канала)")
         return
 
     try:
         channel_id_int = int(channel_id)
     except ValueError:
         await update.message.reply_text("ID канала должен быть числом.")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (ошибка ID канала)")
         return
 
     text = f"🏋️ *Новый комплекс: {complex_data[1]}*\n\n"
@@ -482,51 +270,40 @@ async def publish_complex_command(update: Update, context: ContextTypes.DEFAULT_
     except TelegramError as e:
         logger.exception("Ошибка публикации комплекса в канал")
         await update.message.reply_text(f"❌ Не удалось отправить в канал: {e}")
-        debug_print(f"📤 publish_complex_command: ВОЗВРАТ (ошибка отправки)")
         return
     save_published_post('complex', complex_id, channel_id_int, sent_message.message_id)
 
     await update.message.reply_text(f"✅ Комплекс «{complex_data[1]}» опубликован в канале.")
-    debug_print(f"📤 publish_complex_command: ВОЗВРАТ")
 
 
-@log_call
 async def publish_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Публикует упражнение в канал с кнопкой 'Сдать результат'."""
-    debug_print(f"🔥 publish_exercise_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (нет прав)")
         return
     if not context.args:
         await update.message.reply_text("Использование: /publish_exercise <id>")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         exercise_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (ошибка ID)")
         return
 
     exercise = get_exercise_by_id(exercise_id)
     if not exercise:
         await update.message.reply_text("Упражнение не найдено.")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (упражнение не найдено)")
         return
 
     channel_id = get_setting("public_channel")
     if not channel_id:
         await update.message.reply_text("Сначала установите канал командой /set_channel <id>")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (нет канала)")
         return
 
     try:
         channel_id_int = int(channel_id)
     except ValueError:
         await update.message.reply_text("ID канала должен быть числом.")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (ошибка ID канала)")
         return
 
     name = exercise[1]
@@ -551,51 +328,40 @@ async def publish_exercise_command(update: Update, context: ContextTypes.DEFAULT
     except TelegramError as e:
         logger.exception("Ошибка публикации упражнения в канал")
         await update.message.reply_text(f"❌ Не удалось отправить в канал: {e}")
-        debug_print(f"📤 publish_exercise_command: ВОЗВРАТ (ошибка отправки)")
         return
     save_published_post('exercise', exercise_id, channel_id_int, sent_message.message_id)
 
     await update.message.reply_text(f"✅ Упражнение «{name}» опубликовано в канале.")
-    debug_print(f"📤 publish_exercise_command: ВОЗВРАТ")
 
 
-@log_call
 async def publish_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Публикует челлендж в канал с кнопкой 'Сдать результат'."""
-    debug_print(f"🔥 publish_challenge_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (нет прав)")
         return
     if not context.args:
         await update.message.reply_text("Использование: /publish_challenge <id>")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         challenge_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (ошибка ID)")
         return
 
     challenge = get_challenge_by_id(challenge_id)
     if not challenge:
         await update.message.reply_text("Челлендж не найден.")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (челлендж не найден)")
         return
 
     channel_id = get_setting("public_channel")
     if not channel_id:
         await update.message.reply_text("Сначала установите канал командой /set_channel <id>")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (нет канала)")
         return
 
     try:
         channel_id_int = int(channel_id)
     except ValueError:
         await update.message.reply_text("ID канала должен быть числом.")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (ошибка ID канала)")
         return
 
     name = challenge[1]
@@ -621,69 +387,47 @@ async def publish_challenge_command(update: Update, context: ContextTypes.DEFAUL
     except TelegramError as e:
         logger.exception("Ошибка публикации челленджа в канал")
         await update.message.reply_text(f"❌ Не удалось отправить в канал: {e}")
-        debug_print(f"📤 publish_challenge_command: ВОЗВРАТ (ошибка отправки)")
         return
     save_published_post('challenge', challenge_id, channel_id_int, sent_message.message_id)
 
     await update.message.reply_text(f"✅ Челлендж «{name}» опубликован в канале.")
-    debug_print(f"📤 publish_challenge_command: ВОЗВРАТ")
 
 
-@log_call
 async def set_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 set_channel_command: ВХОД")
-
     if not is_admin(update):
-        debug_print(f"📤 set_channel_command: ВОЗВРАТ (нет прав)")
         return
     if not context.args:
         await update.message.reply_text("Использование: /set_channel <chat_id>")
-        debug_print(f"📤 set_channel_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         chat_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 set_channel_command: ВОЗВРАТ (ошибка ID)")
         return
     set_setting("public_channel", str(chat_id))
     await update.message.reply_text(f"✅ Канал установлен: {chat_id}")
-    debug_print(f"📤 set_channel_command: ВОЗВРАТ")
 
 
-@log_call
 async def get_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 get_channel_command: ВХОД")
-
     if not is_admin(update):
-        debug_print(f"📤 get_channel_command: ВОЗВРАТ (нет прав)")
         return
     channel = get_setting("public_channel")
     await update.message.reply_text(f"Текущий канал: {channel}" if channel else "Канал не установлен")
-    debug_print(f"📤 get_channel_command: ВОЗВРАТ")
 
 
-@log_call
 async def get_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 get_channel_id: ВХОД")
-
     if update.message:
         chat_id = update.message.chat_id
         await update.message.reply_text(f"ID этого чата: {chat_id}")
-    debug_print(f"📤 get_channel_id: ВОЗВРАТ")
 
 
-@log_call
 async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для добавления комментария к посту в канале"""
-    debug_print(f"🔥 comment_command: ВХОД")
-
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "❌ Использование: /comment <id_сообщения> <текст>\n\n"
             "Например: /comment 123 Отличная тренировка!"
         )
-        debug_print(f"📤 comment_command: ВОЗВРАТ (недостаточно аргументов)")
         return
 
     try:
@@ -691,13 +435,11 @@ async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         comment_text = " ".join(context.args[1:])
     except ValueError:
         await update.message.reply_text("❌ ID сообщения должен быть числом.")
-        debug_print(f"📤 comment_command: ВОЗВРАТ (ошибка ID)")
         return
 
     channel_id = get_setting("public_channel")
     if not channel_id:
         await update.message.reply_text("❌ Канал не настроен.")
-        debug_print(f"📤 comment_command: ВОЗВРАТ (нет канала)")
         return
 
     user = update.effective_user
@@ -716,29 +458,18 @@ async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка комментария: {e}")
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
-    debug_print(f"📤 comment_command: ВОЗВРАТ")
 
-
-@log_call
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает текущее состояние диалога (только для админа)."""
-    debug_print(f"🔥 debug_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 debug_command: ВОЗВРАТ (нет прав)")
         return
     state = context.user_data.get('conversation_state')
     await update.message.reply_text(f"📊 Состояние диалога: {state}", parse_mode='Markdown')
-    debug_print(f"📤 debug_command: ВОЗВРАТ, state={state}")
 
 
-# ==================== ОБРАБОТКА ТЕКСТА И ФОТО ====================
-@log_call
+# ========== ОБРАБОТКА ТЕКСТА И ФОТО ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 handle_message: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
     user_question = update.message.text
     await update.message.chat.send_action(action="typing")
     try:
@@ -755,13 +486,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка в handle_message")
         await update.message.reply_text(format_error("Ошибка при ответе ИИ."))
 
-    debug_print(f"📤 handle_message: ВОЗВРАТ")
 
-
-@log_call
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 button_handler: ВХОД")
-
     query = update.callback_query
     await query.answer()
     context.user_data['effect'] = query.data
@@ -772,17 +498,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     name = styles.get(query.data, query.data)
     await query.edit_message_text(f"✅ Выбран стиль: {name}. Теперь отправляй фото!")
-    debug_print(f"📤 button_handler: ВОЗВРАТ")
 
 
-@log_call
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 handle_photo: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
     if 'effect' not in context.user_data:
         await update.message.reply_text("Сначала выбери стиль через /menu")
-        debug_print(f"📤 handle_photo: ВОЗВРАТ (нет эффекта)")
         return
     effect = context.user_data['effect']
     photo_file = await update.message.photo[-1].get_file()
@@ -803,95 +523,45 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка в handle_photo")
         await update.message.reply_text("❌ Не удалось обработать фото.")
 
-    debug_print(f"📤 handle_photo: ВОЗВРАТ")
 
-
-# ==================== СПОРТИВНЫЕ КОМАНДЫ ====================
-@log_call
 async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    print(f"🔹 Получен callback: {data}")
 
-    debug_print(f"🔥 sport_callback_handler: ВХОД")
-    debug_print(f"📨 ПОЛУЧЕН CALLBACK: {data}")
-    debug_print(f"📦 user_data: {context.user_data}")
-    debug_print(f"🏷️ состояние: {context.user_data.get('conversation_state')}")
-
-    if DEBUG_MODE:
-        debug_print(f"🔥 sport_callback_handler: data={data}")
-
-    # Ветки обработки
     if data == 'sport_catalog':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_catalog")
         await catalog_command(update, context)
     elif data == 'sport_wod':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_wod")
         await query.edit_message_text("Отправь /wod для записи тренировки")
     elif data == 'sport_mystats':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_mystats")
         await mystats_command(update, context)
     elif data == 'sport_setlevel':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_setlevel")
         await setlevel_command(update, context)
     elif data == 'back_to_main':
-        debug_print(f"🔥 sport_callback_handler: ветка back_to_main")
         await start(update, context)
     elif data == 'sport_complexes':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_complexes")
         await complexes_command(update, context)
     elif data == 'sport_challenges':
-        debug_print(f"🔥 sport_callback_handler: ветка sport_challenges")
         await challenges_command(update, context)
     elif data.startswith('join_challenge_'):
-        debug_print(f"🔥 sport_callback_handler: ветка join_challenge_")
-        logger.debug(f"🔹 Попытка присоединиться к челленджу: {data}")
+        print(f"🔹 Попытка присоединиться к челленджу: {data}")
         challenge_id = int(data.split('_')[2])
         await update.callback_query.edit_message_text(f"Вы присоединились к челленджу #{challenge_id}")
     elif data == "cancel_catalog":
-        debug_print(f"🔥 sport_callback_handler: ветка cancel_catalog")
         await do_exercise_callback(update, context)
         return
     elif data == "cancel_challenges":
-        debug_print(f"🔥 sport_callback_handler: ветка cancel_challenges")
         await start(update, context)
         return
-    elif data == "cancel_complex":
-        debug_print(f"🔥 sport_callback_handler: ветка cancel_complex")
-        from utils import handle_cancel
-        return await handle_cancel(update, context)
-    elif data.startswith('complex_ex_'):
-        debug_print(f"🔥 sport_callback_handler: ветка complex_ex_")
-        # Выполнение упражнения из комплекса
-        parts = data.split('_')
-        exercise_id = int(parts[2])
-        complex_id = int(parts[3])
-        reps = int(parts[4])
-        context.user_data['pending_exercise'] = exercise_id
-        context.user_data['submit_entity_type'] = 'exercise'
-        context.user_data['submit_entity_id'] = exercise_id
-        context.user_data['complex_reps'] = reps
-        context.user_data['current_complex_id'] = complex_id
-        state = await workout_start(update, context)
-        if state:
-            context.user_data['conversation_state'] = state
-    else:
-        debug_print(f"🔥 sport_callback_handler: неизвестная ветка: {data}")
 
-    debug_print(f"📤 sport_callback_handler: ВОЗВРАТ")
-
-
-@log_call
 async def send_catalog_to_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 send_catalog_to_message: ВХОД")
-
     exercises = get_all_exercises()
     if not exercises:
         if update.callback_query:
             await update.callback_query.edit_message_text("Список упражнений пуст.")
         else:
             await update.message.reply_text("Список упражнений пуст.")
-        debug_print(f"📤 send_catalog_to_message: ВОЗВРАТ (нет упражнений)")
         return
 
     keyboard = []
@@ -902,28 +572,18 @@ async def send_catalog_to_message(update: Update, context: ContextTypes.DEFAULT_
         keyboard.append(
             [InlineKeyboardButton(f"💪 {ex_name} ({ex_points} баллов)", callback_data=f'do_exercise_{ex_id}')])
 
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_catalog")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "📋 **КАТАЛОГ УПРАЖНЕНИЙ**\n\nВыбери упражнение для выполнения:"
-
-    if DEBUG_MODE:
-        debug_print(f"🔥 send_catalog_to_message: клавиатура создана, кнопок={len(keyboard)}")
-        for btn_row in keyboard:
-            for btn in btn_row:
-                debug_print(f"   кнопка: {btn.text} -> {btn.callback_data}")
 
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
     else:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-    debug_print(f"📤 send_catalog_to_message: ВОЗВРАТ")
 
-
-@log_call
 async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 mystats_command: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
     user_id = update.effective_user.id
     total = get_user_scoreboard_total(user_id)
     workouts = get_user_workouts(user_id, limit=1000)
@@ -935,139 +595,108 @@ async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode='Markdown')
 
-    debug_print(f"📤 mystats_command: ВОЗВРАТ")
 
-
-@log_call
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 top_command: ВХОД")
-
     leaderboard = get_leaderboard_from_scoreboard()
     if not leaderboard:
         await update.message.reply_text("Нет данных.")
-        debug_print(f"📤 top_command: ВОЗВРАТ (нет данных)")
         return
     text = "🏆 **ТОП ИГРОКОВ**\n\n" + "\n".join(
         [f"{i + 1}. {row[1] or row[2]} — {row[3]} баллов" for i, row in enumerate(leaderboard[:10])])
     await update.message.reply_text(text, parse_mode='Markdown')
-    debug_print(f"📤 top_command: ВОЗВРАТ")
 
 
-@log_call
 async def setlevel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 setlevel_command: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
-    # Если есть аргументы командной строки (/setlevel beginner)
     if context.args and context.args[0] in ('beginner', 'pro'):
         set_user_level(update.effective_user.id, context.args[0])
         msg = f"✅ Уровень изменён на {context.args[0]}."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(msg)
-        else:
-            await update.message.reply_text(msg)
     else:
-        # Если нет аргументов — показываем кнопки выбора уровня
-        debug_print(f"🔥 setlevel_command: показать кнопки выбора уровня")
-
-        # Получаем текущий уровень пользователя
-        current_level = get_user_level(update.effective_user.id)
-        debug_print(f"🔥 setlevel_command: текущий уровень = {current_level}")
-
-        # Создаём кнопки
-        keyboard = [
-            [InlineKeyboardButton("🟢 Новичок (beginner) ✅" if current_level == 'beginner' else "🟢 Новичок (beginner)",
-                                  callback_data='setlevel_beginner')],
-            [InlineKeyboardButton("🔴 Профи (pro) ✅" if current_level == 'pro' else "🔴 Профи (pro)",
-                                  callback_data='setlevel_pro')],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        msg = f"🎯 **Выбор уровня**\n\nТвой текущий уровень: **{current_level}**\n\nВыбери уровень:"
-
-        if update.callback_query:
-            await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
-
-    debug_print(f"📤 setlevel_command: ВОЗВРАТ")
+        msg = "/setlevel beginner|pro"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg)
+    else:
+        await update.message.reply_text(msg)
 
 
-@log_call
-async def delete_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_exercise_command: ВХОД")
-
+# ========== КОМАНДЫ ДЛЯ УПРАЖНЕНИЙ ==========
+async def add_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 delete_exercise_command: ВОЗВРАТ (нет прав)")
+        return
+    full_text = update.message.text
+    if ' ' not in full_text:
+        await update.message.reply_text(
+            "Использование: /addexercise <название> <reps|time> <описание> <баллы> [неделя] [difficulty]")
+        return
+    args_part = full_text.split(maxsplit=1)[1]
+    try:
+        args = shlex.split(args_part)
+        if len(args) < 4:
+            await update.message.reply_text("❌ Нужно минимум 4 аргумента.")
+            return
+        name, metric, desc, points = args[0], args[1], args[2], int(args[3])
+        week = int(args[4]) if len(args) > 4 and args[4].isdigit() else 0
+        diff = args[5] if len(args) > 5 else 'beginner'
+        if add_exercise(name, desc, metric, points, week, diff):
+            await update.message.reply_text(f"✅ Упражнение '{name}' добавлено.")
+        else:
+            await update.message.reply_text(format_error("Ошибка добавления."))
+    except Exception as e:
+        await update.message.reply_text(format_error(f"Ошибка парсинга: {e}"))
+
+
+async def delete_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет прав.")
         return
     if not context.args:
         await update.message.reply_text("Использование: /delexercise <id>")
-        debug_print(f"📤 delete_exercise_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         exercise_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 delete_exercise_command: ВОЗВРАТ (ошибка ID)")
         return
 
     ex = get_exercise_by_id(exercise_id)
     if not ex:
         await update.message.reply_text("Упражнение не найдено.")
-        debug_print(f"📤 delete_exercise_command: ВОЗВРАТ (упражнение не найдено)")
         return
 
     context.user_data['delete_exercise_id'] = exercise_id
     context.user_data['delete_exercise_name'] = ex[1]
     await update.message.reply_text(
         f"Вы уверены, что хотите удалить упражнение '{ex[1]}' (ID {exercise_id})? Отправьте 'ДА' для подтверждения.")
-    debug_print(f"📤 delete_exercise_command: ВОЗВРАТ CONFIRM_DELETE")
     return CONFIRM_DELETE
 
 
-@log_call
 async def delete_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_exercise_start: ВХОД")
-
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Введите ID упражнения для удаления:")
     else:
         await update.message.reply_text("Введите ID упражнения для удаления:")
-    debug_print(f"📤 delete_exercise_start: ВОЗВРАТ WAIT_DELETE_ID")
     return WAIT_DELETE_ID
 
 
-@log_call
 async def delete_exercise_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_exercise_get_id: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         exercise_id = int(update.message.text.strip())
     except ValueError:
         await update.message.reply_text("ID должен быть числом. Попробуйте ещё раз:")
-        debug_print(f"📤 delete_exercise_get_id: ВОЗВРАТ WAIT_DELETE_ID (ошибка ID)")
         return WAIT_DELETE_ID
     ex = get_exercise_by_id(exercise_id)
     if not ex:
         await update.message.reply_text("Упражнение не найдено.")
-        debug_print(f"📤 delete_exercise_get_id: ВОЗВРАТ END")
         return ConversationHandler.END
     context.user_data['delete_exercise_id'] = exercise_id
     context.user_data['delete_exercise_name'] = ex[1]
     await update.message.reply_text(
         f"Вы уверены, что хотите удалить упражнение '{ex[1]}' (ID {exercise_id})? Отправьте 'ДА' для подтверждения.")
-    debug_print(f"📤 delete_exercise_get_id: ВОЗВРАТ CONFIRM_DELETE")
     return CONFIRM_DELETE
 
 
-@log_call
 async def confirm_delete_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 confirm_delete_exercise: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     text = update.message.text.strip()
     if text.upper() == "ДА":
         exercise_id = context.user_data.get('delete_exercise_id')
@@ -1082,16 +711,11 @@ async def confirm_delete_exercise(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("❌ Удаление отменено.")
     context.user_data.pop('delete_exercise_id', None)
     context.user_data.pop('delete_exercise_name', None)
-    debug_print(f"📤 confirm_delete_exercise: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-@log_call
 async def list_exercises_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 list_exercises_command: ВХОД")
-
     if not is_admin(update):
-        debug_print(f"📤 list_exercises_command: ВОЗВРАТ (нет прав)")
         return
     page = 1
     if context.args and context.args[0].isdigit():
@@ -1099,7 +723,6 @@ async def list_exercises_command(update: Update, context: ContextTypes.DEFAULT_T
     all_exercises = get_all_exercises()
     if not all_exercises:
         await update.message.reply_text("Упражнений пока нет.")
-        debug_print(f"📤 list_exercises_command: ВОЗВРАТ (нет упражнений)")
         return
     exercises, keyboard = paginate(all_exercises, page, per_page=5, prefix='ex_page')
     text = "📋 **Список упражнений:**\n\n"
@@ -1108,13 +731,9 @@ async def list_exercises_command(update: Update, context: ContextTypes.DEFAULT_T
         text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-    debug_print(f"📤 list_exercises_command: ВОЗВРАТ")
 
 
-@log_call
 async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 exercise_page_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     page = int(query.data.split('_')[2])
@@ -1126,15 +745,10 @@ async def exercise_page_callback(update: Update, context: ContextTypes.DEFAULT_T
         text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-    debug_print(f"📤 exercise_page_callback: ВОЗВРАТ")
 
 
-@log_call
 async def load_exercises_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 load_exercises_command: ВХОД")
-
     if not is_admin(update):
-        debug_print(f"📤 load_exercises_command: ВОЗВРАТ (нет прав)")
         return
     try:
         with open('exercises.json', 'r', encoding='utf-8') as f:
@@ -1145,27 +759,18 @@ async def load_exercises_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("✅ Загружено.")
     except Exception as e:
         await update.message.reply_text(format_error(f"Ошибка: {e}"))
-    debug_print(f"📤 load_exercises_command: ВОЗВРАТ")
 
 
-@log_call
 async def recalc_rankings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 recalc_rankings_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 recalc_rankings_command: ВОЗВРАТ (нет прав)")
         return
     await update.message.reply_text("⏳ Начинаю пересчёт рейтинга...")
     recalculate_rankings(period_days=7)
     await update.message.reply_text("✅ Рейтинг пересчитан.")
-    debug_print(f"📤 recalc_rankings_command: ВОЗВРАТ")
 
 
-@log_call
 async def myhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 myhistory_command: ВХОД")
-
     user_id = update.effective_user.id
     limit = 20
     if context.args and context.args[0].isdigit():
@@ -1175,7 +780,6 @@ async def myhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workouts = get_user_workouts(user_id, limit)
     if not workouts:
         await update.message.reply_text("Нет тренировок.")
-        debug_print(f"📤 myhistory_command: ВОЗВРАТ (нет тренировок)")
         return
     text = f"📋 **Твои последние {len(workouts)} тренировок:**\n\n"
     for w in workouts:
@@ -1190,17 +794,12 @@ async def myhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "\n...и ещё"
             break
     await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=True)
-    debug_print(f"📤 myhistory_command: ВОЗВРАТ")
 
 
-# ==================== КОМАНДЫ ДЛЯ КОМПЛЕКСОВ ====================
-@log_call
+# ========== КОМАНДЫ ДЛЯ КОМПЛЕКСОВ ==========
 async def add_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 add_complex_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 add_complex_command: ВОЗВРАТ (нет прав)")
         return
     try:
         text = update.message.text.split(maxsplit=1)[1]
@@ -1208,33 +807,25 @@ async def add_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if len(args) < 4:
             await update.message.reply_text(
                 "Использование: /addcomplex <название> <описание> <тип> <баллы>\nТип: for_time или for_reps")
-            debug_print(f"📤 add_complex_command: ВОЗВРАТ (мало аргументов)")
             return
         name, description, type_, points = args[0], args[1], args[2], int(args[3])
         if type_ not in ('for_time', 'for_reps'):
             await update.message.reply_text("Тип должен быть for_time или for_reps")
-            debug_print(f"📤 add_complex_command: ВОЗВРАТ (неверный тип)")
             return
         complex_id = add_complex(name, description, type_, points)
         await update.message.reply_text(f"✅ Комплекс «{name}» создан с ID {complex_id}.")
     except Exception as e:
         await update.message.reply_text(format_error(f"Ошибка: {e}"))
-    debug_print(f"📤 add_complex_command: ВОЗВРАТ")
 
 
-@log_call
 async def add_complex_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 add_complex_exercise_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 add_complex_exercise_command: ВОЗВРАТ (нет прав)")
         return
     try:
         args = context.args
         if len(args) != 3:
             await update.message.reply_text("Использование: /addcomplexexercise <complex_id> <exercise_id> <reps>")
-            debug_print(f"📤 add_complex_exercise_command: ВОЗВРАТ (не 3 аргумента)")
             return
         complex_id = int(args[0])
         exercise_id = int(args[1])
@@ -1242,34 +833,24 @@ async def add_complex_exercise_command(update: Update, context: ContextTypes.DEF
         complex_data = get_complex_by_id(complex_id)
         if not complex_data:
             await update.message.reply_text("Комплекс не найден.")
-            debug_print(f"📤 add_complex_exercise_command: ВОЗВРАТ (комплекс не найден)")
             return
         ex = get_exercise_by_id(exercise_id)
         if not ex:
             await update.message.reply_text("Упражнение не найдено.")
-            debug_print(f"📤 add_complex_exercise_command: ВОЗВРАТ (упражнение не найдено)")
             return
         add_complex_exercise(complex_id, exercise_id, reps)
         await update.message.reply_text(f"✅ Упражнение «{ex[1]}» добавлено в комплекс {complex_data[1]}.")
     except Exception as e:
         await update.message.reply_text(format_error(f"Ошибка: {e}"))
-    debug_print(f"📤 add_complex_exercise_command: ВОЗВРАТ")
 
 
-@log_call
 async def complexes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complexes_command: ВХОД")
-
-    if DEBUG_MODE:
-        debug_print("🔥 complexes_command: вызвана")
-
     all_complexes = get_all_complexes()
     if not all_complexes:
         if update.callback_query:
             await update.callback_query.edit_message_text("Комплексов пока нет.")
         else:
             await update.message.reply_text("Комплексов пока нет.")
-        debug_print(f"📤 complexes_command: ВОЗВРАТ (нет комплексов)")
         return
 
     keyboard = []
@@ -1286,67 +867,47 @@ async def complexes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-    debug_print(f"📤 complexes_command: ВОЗВРАТ")
 
-
-@log_call
 async def complex_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_detail_command: ВХОД")
-
     try:
         complex_id = int(context.args[0])
     except (ValueError, IndexError, TypeError):
         await update.message.reply_text("Использование: /complex <id>")
-        debug_print(f"📤 complex_detail_command: ВОЗВРАТ (ошибка ID)")
         return
     complex_data = get_complex_by_id(complex_id)
     if not complex_data:
         await update.message.reply_text("Комплекс не найден.")
-        debug_print(f"📤 complex_detail_command: ВОЗВРАТ (комплекс не найден)")
         return
     exercises = get_complex_exercises(complex_id)
     text = f"**{complex_data[1]}**\n{complex_data[2]}\n\nТип: {'Время' if complex_data[3] == 'for_time' else 'Повторения'}\nБаллы: {complex_data[4]}\n\n**Упражнения:**\n"
     for ex in exercises:
         text += f"• {ex[2]} — {ex[4]} повторений\n"
     await update.message.reply_text(text, parse_mode='Markdown')
-    debug_print(f"📤 complex_detail_command: ВОЗВРАТ")
 
 
-@log_call
 async def delete_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_complex_command: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 delete_complex_command: ВОЗВРАТ (нет прав)")
         return
     if not context.args:
         await update.message.reply_text("Использование: /deletecomplex <id>")
-        debug_print(f"📤 delete_complex_command: ВОЗВРАТ (нет аргументов)")
         return
     try:
         complex_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 delete_complex_command: ВОЗВРАТ (ошибка ID)")
         return
     complex_data = get_complex_by_id(complex_id)
     if not complex_data:
         await update.message.reply_text("Комплекс не найден.")
-        debug_print(f"📤 delete_complex_command: ВОЗВРАТ (комплекс не найден)")
         return
     context.user_data['delete_complex_id'] = complex_id
     await update.message.reply_text(
         f"Вы уверены, что хотите удалить комплекс '{complex_data[1]}'? Отправьте 'ДА' для подтверждения.")
-    debug_print(f"📤 delete_complex_command: ВОЗВРАТ CONFIRM_DELETE_COMPLEX")
     return CONFIRM_DELETE_COMPLEX
 
 
-@log_call
 async def confirm_delete_complex(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 confirm_delete_complex: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     text = (update.message.text or "").strip()
     if text.upper() == "ДА":
         complex_id = context.user_data.get('delete_complex_id')
@@ -1367,48 +928,33 @@ async def confirm_delete_complex(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await update.message.reply_text("❌ Удаление отменено.")
     context.user_data.clear()
-    debug_print(f"📤 confirm_delete_complex: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-# ==================== КОМАНДЫ ДЛЯ ЧЕЛЛЕНДЖЕЙ ====================
-@log_call
+# ========== КОМАНДЫ ДЛЯ ЧЕЛЛЕНДЖЕЙ ==========
 async def addchallenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 addchallenge_start: ВХОД")
-
     if not is_admin(update):
         if update.callback_query:
             await update.callback_query.answer()
             await update.callback_query.edit_message_text("⛔ Нет прав.")
         else:
             await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 addchallenge_start: ВОЗВРАТ END (нет прав)")
         return ConversationHandler.END
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Введите название челленджа:")
     else:
         await update.message.reply_text("Введите название челленджа:")
-    debug_print(f"📤 addchallenge_start: ВОЗВРАТ CHALL_NAME")
     return CHALL_NAME
 
 
-@log_call
 async def challenge_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_name_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     context.user_data['challenge_name'] = update.message.text
     await update.message.reply_text("Введите описание челленджа (можно пропустить, отправьте '-'):")
-    debug_print(f"📤 challenge_name_input: ВОЗВРАТ CHALL_DESC")
     return CHALL_DESC
 
 
-@log_call
 async def challenge_desc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_desc_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     desc = update.message.text
     if desc == '-':
         desc = ''
@@ -1418,14 +964,10 @@ async def challenge_desc_input(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("Комплекс", callback_data="chall_target_complex")],
     ]
     await update.message.reply_text("Выберите тип цели:", reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 challenge_desc_input: ВОЗВРАТ CHALL_TYPE")
     return CHALL_TYPE
 
 
-@log_call
 async def challenge_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_type_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     if query.data == "chall_target_exercise":
@@ -1433,33 +975,26 @@ async def challenge_type_callback(update: Update, context: ContextTypes.DEFAULT_
         exercises = get_all_exercises()
         if not exercises:
             await query.edit_message_text("Нет упражнений.")
-            debug_print(f"📤 challenge_type_callback: ВОЗВРАТ END")
             return ConversationHandler.END
         keyboard = []
         for ex in exercises:
             keyboard.append([InlineKeyboardButton(ex[1], callback_data=f"chall_ex_{ex[0]}")])
         await query.edit_message_text("Выберите упражнение:", reply_markup=InlineKeyboardMarkup(keyboard))
-        debug_print(f"📤 challenge_type_callback: ВОЗВРАТ CHALL_TARGET")
         return CHALL_TARGET
     else:
         context.user_data['challenge_target_type'] = 'complex'
         complexes = get_all_complexes()
         if not complexes:
             await query.edit_message_text("Нет комплексов.")
-            debug_print(f"📤 challenge_type_callback: ВОЗВРАТ END")
             return ConversationHandler.END
         keyboard = []
         for c in complexes:
             keyboard.append([InlineKeyboardButton(c[1], callback_data=f"chall_cx_{c[0]}")])
         await query.edit_message_text("Выберите комплекс:", reply_markup=InlineKeyboardMarkup(keyboard))
-        debug_print(f"📤 challenge_type_callback: ВОЗВРАТ CHALL_TARGET")
         return CHALL_TARGET
 
 
-@log_call
 async def challenge_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_target_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1472,9 +1007,7 @@ async def challenge_target_callback(update: Update, context: ContextTypes.DEFAUL
             await query.edit_message_text(f"Выбрано упражнение: {ex[1]}. Введите целевое значение (для {ex[3]}):")
         else:
             await query.edit_message_text("Упражнение не найдено.")
-            debug_print(f"📤 challenge_target_callback: ВОЗВРАТ END")
             return ConversationHandler.END
-        debug_print(f"📤 challenge_target_callback: ВОЗВРАТ CHALL_TARGET_VALUE")
         return CHALL_TARGET_VALUE
     else:
         target_id = int(data.split('_')[2])
@@ -1486,84 +1019,57 @@ async def challenge_target_callback(update: Update, context: ContextTypes.DEFAUL
                 f"Выбран комплекс: {complex_data[1]}. Введите целевое значение (для {complex_data[3]}):")
         else:
             await query.edit_message_text("Комплекс не найден.")
-            debug_print(f"📤 challenge_target_callback: ВОЗВРАТ END")
             return ConversationHandler.END
-        debug_print(f"📤 challenge_target_callback: ВОЗВРАТ CHALL_TARGET_VALUE")
         return CHALL_TARGET_VALUE
 
 
-@log_call
 async def challenge_target_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_target_value_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     target_value = update.message.text.strip()
     metric = context.user_data.get('challenge_metric')
     if metric == 'reps':
         if not target_value.isdigit():
             await update.message.reply_text("Введите целое число повторений.")
-            debug_print(f"📤 challenge_target_value_input: ВОЗВРАТ CHALL_TARGET_VALUE (не число)")
             return CHALL_TARGET_VALUE
     else:
         if not re.match(r'^\d{1,2}:\d{2}$', target_value):
             await update.message.reply_text("Введите время в формате ММ:СС (например, 05:30).")
-            debug_print(f"📤 challenge_target_value_input: ВОЗВРАТ CHALL_TARGET_VALUE (неверный формат)")
             return CHALL_TARGET_VALUE
     context.user_data['challenge_target_value'] = target_value
     await update.message.reply_text("Введите дату начала челленджа в формате ДД.ММ.ГГГГ:")
-    debug_print(f"📤 challenge_target_value_input: ВОЗВРАТ CHALL_START_DATE")
     return CHALL_START_DATE
 
 
-@log_call
 async def challenge_start_date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_start_date_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     start_date_str = update.message.text.strip()
     start_date = parse_date(start_date_str)
     if not start_date:
         await update.message.reply_text("Неверный формат. Введите дату в формате ДД.ММ.ГГГГ.")
-        debug_print(f"📤 challenge_start_date_input: ВОЗВРАТ CHALL_START_DATE (неверный формат)")
         return CHALL_START_DATE
     context.user_data['challenge_start_date'] = start_date
     await update.message.reply_text("Введите дату окончания челленджа в формате ДД.ММ.ГГГГ:")
-    debug_print(f"📤 challenge_start_date_input: ВОЗВРАТ CHALL_END_DATE")
     return CHALL_END_DATE
 
 
-@log_call
 async def challenge_end_date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_end_date_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     end_date_str = update.message.text.strip()
     end_date = parse_date(end_date_str)
     if not end_date:
         await update.message.reply_text("Неверный формат. Введите дату в формате ДД.ММ.ГГГГ.")
-        debug_print(f"📤 challenge_end_date_input: ВОЗВРАТ CHALL_END_DATE (неверный формат)")
         return CHALL_END_DATE
     start_date = context.user_data.get('challenge_start_date')
     if start_date and end_date <= start_date:
         await update.message.reply_text("Дата окончания должна быть позже даты начала.")
-        debug_print(f"📤 challenge_end_date_input: ВОЗВРАТ CHALL_END_DATE (дата окончания <= даты начала)")
         return CHALL_END_DATE
     context.user_data['challenge_end_date'] = end_date
     await update.message.reply_text("Введите количество бонусных баллов (целое число):")
-    debug_print(f"📤 challenge_end_date_input: ВОЗВРАТ CHALL_BONUS")
     return CHALL_BONUS
 
 
-@log_call
 async def challenge_bonus_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_bonus_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         bonus = int(update.message.text)
     except ValueError:
         await update.message.reply_text("Введите целое число.")
-        debug_print(f"📤 challenge_bonus_input: ВОЗВРАТ CHALL_BONUS (не число)")
         return CHALL_BONUS
     context.user_data['challenge_bonus'] = bonus
 
@@ -1583,26 +1089,18 @@ async def challenge_bonus_input(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text("❌ Ошибка.")
     context.user_data.clear()
-    debug_print(f"📤 challenge_bonus_input: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-@log_call
 async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenges_command: ВХОД")
-
-    if DEBUG_MODE:
-        debug_print("🔥 challenges_command: вызвана")
-
-    logger.debug("🔹 Вызов challenges_command")
+    print("🔹 Вызов challenges_command")
     challenges = get_challenges_by_status('active')
-    logger.debug(f"🔹 Найдено челленджей: {len(challenges)}")
+    print(f"🔹 Найдено челленджей: {len(challenges)}")
     if not challenges:
         if update.callback_query:
             await update.callback_query.edit_message_text("Активных челленджей нет.")
         else:
             await update.message.reply_text("Активных челленджей нет.")
-        debug_print(f"📤 challenges_command: ВОЗВРАТ (нет челленджей)")
         return
 
     keyboard = []
@@ -1610,8 +1108,9 @@ async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ch_id = ch[0]
         ch_name = ch[1]
         ch_bonus = ch[9]
-        keyboard.append(
-            [InlineKeyboardButton(f"🏆 {ch_name} (бонус: {ch_bonus})", callback_data=f'join_challenge_{ch_id}')])
+        keyboard.append([InlineKeyboardButton(f"🏆 {ch_name} (бонус: {ch_bonus})", callback_data=f'join_challenge_{ch_id}')])
+
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_challenges")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🏆 **Активные челленджи:**\n\nВыбери челлендж для участия:"
@@ -1621,62 +1120,43 @@ async def challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-    debug_print(f"📤 challenges_command: ВОЗВРАТ")
 
-
-@log_call
 async def join_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 join_challenge_command: ВХОД")
-
     try:
         challenge_id = int(context.args[0])
     except (ValueError, IndexError, TypeError):
         await update.message.reply_text("Использование: /join <id>")
-        debug_print(f"📤 join_challenge_command: ВОЗВРАТ (ошибка ID)")
         return
     success = join_challenge(update.effective_user.id, challenge_id)
     if success:
         await update.message.reply_text("✅ Вы присоединились к челленджу!")
     else:
         await update.message.reply_text("❌ Не удалось присоединиться.")
-    debug_print(f"📤 join_challenge_command: ВОЗВРАТ")
 
 
-@log_call
 async def my_challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 my_challenges_command: ВХОД")
-
     challenges = get_user_challenges_with_details(update.effective_user.id)
     if not challenges:
         await update.message.reply_text("Вы не участвуете в челленджах.")
-        debug_print(f"📤 my_challenges_command: ВОЗВРАТ (нет челленджей)")
         return
     text = "🏆 **Ваши челленджи:**\n\n"
     for ch in challenges:
         text += f"**{ch[1]}** — прогресс: {ch[9]}/{ch[6]}\n"
     await update.message.reply_text(text, parse_mode='Markdown')
-    debug_print(f"📤 my_challenges_command: ВОЗВРАТ")
 
 
-@log_call
 async def myprogress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 myprogress_command: ВХОД")
     await my_challenges_command(update, context)
-    debug_print(f"📤 myprogress_command: ВОЗВРАТ")
 
 
-# ==================== ДИАЛОГ ВЫПОЛНЕНИЯ КОМПЛЕКСА ====================
-@log_call
+# ========== ДИАЛОГ ВЫПОЛНЕНИЯ КОМПЛЕКСА ==========
 async def do_complex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 do_complex_start: ВХОД")
-
     query = update.callback_query
     await query.answer()
     complex_id = int(query.data.split('_')[2])
     complex_data = get_complex_by_id(complex_id)
     if not complex_data:
         await query.edit_message_text("Комплекс не найден.")
-        debug_print(f"📤 do_complex_start: ВОЗВРАТ END")
         return ConversationHandler.END
     context.user_data['current_complex_id'] = complex_id
     context.user_data['complex_name'] = complex_data[1]
@@ -1685,79 +1165,52 @@ async def do_complex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Выполняем комплекс **{complex_data[1]}**.\nВведите результат:",
         parse_mode='Markdown',
     )
-    debug_print(f"📤 do_complex_start: ВОЗВРАТ COMPLEX_RESULT")
     return COMPLEX_RESULT
 
 
-@log_call
 async def complex_result_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_result_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     result_text = update.message.text.strip()
     complex_id = context.user_data['current_complex_id']
     complex_data = get_complex_by_id(complex_id)
     if not complex_data:
         await update.message.reply_text("Комплекс не найден.")
-        debug_print(f"📤 complex_result_input: ВОЗВРАТ END")
         return ConversationHandler.END
     complex_type = complex_data[3]
     if complex_type == 'for_time':
         if not re.match(r'^\d{1,2}:\d{2}$', result_text):
             await update.message.reply_text("Неверный формат. Используй ММ:СС")
-            debug_print(f"📤 complex_result_input: ВОЗВРАТ COMPLEX_RESULT (неверный формат)")
             return COMPLEX_RESULT
         context.user_data['complex_result_value'] = result_text
     else:
         if not result_text.isdigit():
             await update.message.reply_text("Введи число повторений.")
-            debug_print(f"📤 complex_result_input: ВОЗВРАТ COMPLEX_RESULT (не число)")
             return COMPLEX_RESULT
         context.user_data['complex_result_value'] = result_text
     await update.message.reply_text("Отправь ссылку на видео:")
-    debug_print(f"📤 complex_result_input: ВОЗВРАТ COMPLEX_VIDEO")
     return COMPLEX_VIDEO
 
 
-@log_call
 async def complex_video_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_video_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     video_url = update.message.text.strip()
     context.user_data['complex_video'] = video_url
     await update.message.reply_text("Добавь комментарий (или /skip):")
-    debug_print(f"📤 complex_video_input: ВОЗВРАТ COMPLEX_COMMENT")
     return COMPLEX_COMMENT
 
 
-@log_call
 async def complex_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_comment_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     comment = update.message.text.strip()
     context.user_data['complex_comment'] = comment
     await save_complex_workout(update, context)
-    debug_print(f"📤 complex_comment_input: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-@log_call
 async def complex_comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_comment_skip: ВХОД")
-
     context.user_data['complex_comment'] = None
     await save_complex_workout(update, context)
-    debug_print(f"📤 complex_comment_skip: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-@log_call
 async def save_complex_workout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 save_complex_workout: ВХОД")
-    debug_print(f"📦 user_data: {context.user_data}")
-
     user_id = update.effective_user.id
     complex_id = context.user_data['current_complex_id']
     result = context.user_data['complex_result_value']
@@ -1776,39 +1229,24 @@ async def save_complex_workout(update: Update, context: ContextTypes.DEFAULT_TYP
     for ach in new_achievements:
         await update.message.reply_text(f"{ach[5]} **{ach[1]}** — {ach[2]}", parse_mode='Markdown')
     await update.message.reply_text("✅ Тренировка записана!")
-    debug_print(f"📤 save_complex_workout: ВОЗВРАТ")
 
 
-# ==================== КОНСТРУКТОР КОМПЛЕКСОВ ====================
-@log_call
+# ========== КОНСТРУКТОР КОМПЛЕКСОВ ==========
 async def newcomplex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 newcomplex_start: ВХОД")
-
     if not is_admin(update):
         await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 newcomplex_start: ВОЗВРАТ END (нет прав)")
         return ConversationHandler.END
     await update.message.reply_text("Введите название комплекса:")
-    debug_print(f"📤 newcomplex_start: ВОЗВРАТ COMPLEX_NAME")
     return COMPLEX_NAME
 
 
-@log_call
 async def complex_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_name_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     context.user_data['complex_name'] = update.message.text
     await update.message.reply_text("Введите описание (можно пропустить, отправьте '-'):")
-    debug_print(f"📤 complex_name_input: ВОЗВРАТ COMPLEX_DESC")
     return COMPLEX_DESC
 
 
-@log_call
 async def complex_desc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_desc_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     desc = update.message.text
     if desc == '-':
         desc = ''
@@ -1818,60 +1256,44 @@ async def complex_desc_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("Повторения (for_reps)", callback_data="type_for_reps")],
     ]
     await update.message.reply_text("Выберите тип комплекса:", reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 complex_desc_input: ВОЗВРАТ COMPLEX_TYPE")
     return COMPLEX_TYPE
 
 
-@log_call
 async def complex_type_temp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_type_temp: ВХОД")
-
     query = update.callback_query
     await query.answer()
     type_ = query.data.split('_')[2]
     context.user_data['complex_type'] = type_
     await query.edit_message_text("Введите количество баллов:")
-    debug_print(f"📤 complex_type_temp: ВОЗВРАТ COMPLEX_POINTS")
     return COMPLEX_POINTS
 
 
-@log_call
 async def complex_points_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_points_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         points = int(update.message.text)
     except:
         await update.message.reply_text("Введите число.")
-        debug_print(f"📤 complex_points_input: ВОЗВРАТ COMPLEX_POINTS (не число)")
         return COMPLEX_POINTS
     context.user_data['complex_points'] = points
     exercises = get_all_exercises()
     if not exercises:
         await update.message.reply_text("Нет упражнений.")
-        debug_print(f"📤 complex_points_input: ВОЗВРАТ END")
         return ConversationHandler.END
     keyboard = []
     for ex in exercises:
         keyboard.append([InlineKeyboardButton(ex[1], callback_data=f"addex_{ex[0]}")])
     keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data="finish_complex")])
     await update.message.reply_text("Выберите упражнения для добавления:", reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 complex_points_input: ВОЗВРАТ COMPLEX_ADD_EXERCISE")
     return COMPLEX_ADD_EXERCISE
 
 
-@log_call
 async def complex_add_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_add_exercise_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     if query.data == "finish_complex":
         exercises_list = context.user_data.get('complex_exercises', [])
         if not exercises_list:
             await query.edit_message_text("Нет упражнений. Комплекс не создан.")
-            debug_print(f"📤 complex_add_exercise_callback: ВОЗВРАТ END (нет упражнений)")
             return ConversationHandler.END
         name = context.user_data.get('complex_name')
         description = context.user_data.get('complex_desc', '')
@@ -1882,26 +1304,19 @@ async def complex_add_exercise_callback(update: Update, context: ContextTypes.DE
             add_complex_exercise(complex_id, item['ex_id'], item['reps'])
         context.user_data.clear()
         await query.edit_message_text(f"✅ Комплекс «{name}» создан!")
-        debug_print(f"📤 complex_add_exercise_callback: ВОЗВРАТ END")
         return ConversationHandler.END
     else:
         ex_id = int(query.data.split('_')[1])
         context.user_data['temp_exercise_id'] = ex_id
         await query.edit_message_text("Введите количество повторений для этого упражнения:")
-        debug_print(f"📤 complex_add_exercise_callback: ВОЗВРАТ COMPLEX_REPS")
         return COMPLEX_REPS
 
 
-@log_call
 async def complex_reps_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_reps_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         reps = int(update.message.text)
     except:
         await update.message.reply_text("Введите число.")
-        debug_print(f"📤 complex_reps_input: ВОЗВРАТ COMPLEX_REPS (не число)")
         return COMPLEX_REPS
     ex_id = context.user_data.pop('temp_exercise_id')
     exercises_list = context.user_data.get('complex_exercises', [])
@@ -1914,57 +1329,40 @@ async def complex_reps_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard.append([InlineKeyboardButton("✅ Завершить", callback_data="finish_complex")])
     await update.message.reply_text("Добавлено! Выберите следующее упражнение или завершите:",
                                     reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 complex_reps_input: ВОЗВРАТ COMPLEX_ADD_EXERCISE")
     return COMPLEX_ADD_EXERCISE
 
 
-# ==================== ДРУГИЕ КОМАНДЫ ====================
-@log_call
+# ========== ДРУГИЕ КОМАНДЫ ==========
 async def setlevel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 setlevel_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     level = query.data.split('_')[1]
     set_user_level(update.effective_user.id, level)
     await query.edit_message_text(f"✅ Уровень изменён на {level}.")
-    debug_print(f"📤 setlevel_callback: ВОЗВРАТ")
 
 
-@log_call
 async def exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 exercise_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     ex_id = int(query.data.split('_')[1])
     ex = get_exercise_by_id(ex_id)
     if not ex:
         await query.edit_message_text("Упражнение не найдено.")
-        debug_print(f"📤 exercise_callback: ВОЗВРАТ")
         return
     text = f"**{ex[1]}**\n{ex[2]}\n🏅 Баллы: {ex[4]}\n📏 Тип: {'повторения' if ex[3] == 'reps' else 'время'}"
     keyboard = [[InlineKeyboardButton("✍️ Записать", callback_data=f"record_{ex_id}")]]
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 exercise_callback: ВОЗВРАТ")
 
 
-@log_call
 async def record_from_catalog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 record_from_catalog_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     ex_id = int(query.data.split('_')[1])
     context.user_data['pending_exercise'] = ex_id
     await query.edit_message_text("Теперь отправь /wod")
-    debug_print(f"📤 record_from_catalog_callback: ВОЗВРАТ")
 
 
-@log_call
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 help_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1981,89 +1379,54 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = "Помощь не найдена"
     await query.edit_message_text(text, parse_mode='Markdown')
-    debug_print(f"📤 help_callback: ВОЗВРАТ")
 
 
-@log_call
 async def stats_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 stats_period_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Статистика за период (демо)")
-    debug_print(f"📤 stats_period_callback: ВОЗВРАТ")
 
 
-@log_call
 async def top_league_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 top_league_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Топ лиги (демо)")
-    debug_print(f"📤 top_league_callback: ВОЗВРАТ")
 
 
-@log_call
 async def complex_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 complex_page_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Список комплексов (демо)")
-    debug_print(f"📤 complex_page_callback: ВОЗВРАТ")
 
 
-@log_call
 async def edit_complex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_complex_command: ВХОД")
-
     await update.message.reply_text("Редактирование комплексов (в разработке)")
-    debug_print(f"📤 edit_complex_command: ВОЗВРАТ")
 
 
-@log_call
 async def edit_complex_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_complex_field_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Редактирование (в разработке)")
-    debug_print(f"📤 edit_complex_field_callback: ВОЗВРАТ")
 
 
-@log_call
 async def edit_complex_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_complex_value_input: ВХОД")
-
     await update.message.reply_text("Редактирование (в разработке)")
-    debug_print(f"📤 edit_complex_value_input: ВОЗВРАТ")
 
 
-@log_call
 async def edit_exercise_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_exercise_start: ВХОД")
-
     await update.message.reply_text("Введите ID упражнения для редактирования:")
-    debug_print(f"📤 edit_exercise_start: ВОЗВРАТ EDIT_EXERCISE_ID")
     return EDIT_EXERCISE_ID
 
 
-@log_call
 async def edit_exercise_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_exercise_id_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         exercise_id = int(update.message.text)
     except:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 edit_exercise_id_input: ВОЗВРАТ EDIT_EXERCISE_ID (не число)")
         return EDIT_EXERCISE_ID
     ex = get_exercise_by_id(exercise_id)
     if not ex:
         await update.message.reply_text("Упражнение не найдено.")
-        debug_print(f"📤 edit_exercise_id_input: ВОЗВРАТ END")
         return ConversationHandler.END
     context.user_data['edit_exercise_id'] = exercise_id
     keyboard = [
@@ -2074,20 +1437,15 @@ async def edit_exercise_id_input(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("Отмена", callback_data="cancel_edit_ex")],
     ]
     await update.message.reply_text(f"Редактируем {ex[1]}:", reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 edit_exercise_id_input: ВОЗВРАТ EDIT_EXERCISE_VALUE")
     return EDIT_EXERCISE_VALUE
 
 
-@log_call
 async def edit_exercise_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_exercise_value_input: ВХОД")
-
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         if query.data == "cancel_edit_ex":
             await query.edit_message_text("Отменено.")
-            debug_print(f"📤 edit_exercise_value_input: ВОЗВРАТ END")
             return ConversationHandler.END
         field_map = {
             "exfield_name": "name",
@@ -2099,7 +1457,6 @@ async def edit_exercise_value_input(update: Update, context: ContextTypes.DEFAUL
         if field:
             context.user_data['edit_field'] = field
             await query.edit_message_text(f"Введите новое значение для {field}:")
-            debug_print(f"📤 edit_exercise_value_input: ВОЗВРАТ EDIT_EXERCISE_VALUE")
             return EDIT_EXERCISE_VALUE
     else:
         text = update.message.text.strip()
@@ -2116,73 +1473,44 @@ async def edit_exercise_value_input(update: Update, context: ContextTypes.DEFAUL
         conn.close()
         await update.message.reply_text(f"✅ {field} обновлён на '{value}'")
         context.user_data.clear()
-        debug_print(f"📤 edit_exercise_value_input: ВОЗВРАТ END")
         return ConversationHandler.END
-    debug_print(f"📤 edit_exercise_value_input: ВОЗВРАТ EDIT_EXERCISE_VALUE")
     return EDIT_EXERCISE_VALUE
 
 
-@log_call
 async def edit_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_exercise_command: ВХОД")
     await edit_exercise_start(update, context)
-    debug_print(f"📤 edit_exercise_command: ВОЗВРАТ")
 
 
-@log_call
 async def challenge_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 challenge_page_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Список челленджей (демо)")
-    debug_print(f"📤 challenge_page_callback: ВОЗВРАТ")
 
 
-@log_call
 async def skip_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 skip_comment_callback: ВХОД")
-
-    result = await skip_comment_finalize(update, context)
-    debug_print(f"📤 skip_comment_callback: ВОЗВРАТ {result}")
-    return result
+    return await skip_comment_finalize(update, context)
 
 
-@log_call
 async def delete_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_challenge_start: ВХОД")
-
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Введите ID челленджа для удаления:")
     else:
         await update.message.reply_text("Введите ID челленджа для удаления:")
-    debug_print(f"📤 delete_challenge_start: ВОЗВРАТ WAIT_DELETE_CHALLENGE_ID")
     return WAIT_DELETE_CHALLENGE_ID
 
-
-@log_call
 async def delete_challenge_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_challenge_get_id: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         challenge_id = int(update.message.text)
     except (ValueError, TypeError):
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 delete_challenge_get_id: ВОЗВРАТ WAIT_DELETE_CHALLENGE_ID (не число)")
         return WAIT_DELETE_CHALLENGE_ID
     context.user_data['delete_challenge_id'] = challenge_id
     await update.message.reply_text(f"Удалить челлендж {challenge_id}? Отправьте 'ДА'")
-    debug_print(f"📤 delete_challenge_get_id: ВОЗВРАТ CONFIRM_DELETE")
     return CONFIRM_DELETE
 
 
-@log_call
 async def confirm_delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 confirm_delete_challenge: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     if update.message.text.upper() == "ДА":
         challenge_id = context.user_data.get('delete_challenge_id')
         conn = sqlite3.connect(DB_NAME)
@@ -2196,38 +1524,27 @@ async def confirm_delete_challenge(update: Update, context: ContextTypes.DEFAULT
     else:
         await update.message.reply_text("❌ Отменено.")
     context.user_data.clear()
-    debug_print(f"📤 confirm_delete_challenge: ВОЗВРАТ END")
     return ConversationHandler.END
 
 
-@log_call
 async def edit_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_challenge_start: ВХОД")
-
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Введите ID челленджа для редактирования:")
     else:
         await update.message.reply_text("Введите ID челленджа для редактирования:")
-    debug_print(f"📤 edit_challenge_start: ВОЗВРАТ EDIT_CHALLENGE_ID")
     return EDIT_CHALLENGE_ID
 
 
-@log_call
 async def edit_challenge_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_challenge_id_input: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         challenge_id = int(update.message.text)
     except:
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 edit_challenge_id_input: ВОЗВРАТ EDIT_CHALLENGE_ID (не число)")
         return EDIT_CHALLENGE_ID
     challenge = get_challenge_by_id(challenge_id)
     if not challenge:
         await update.message.reply_text("Челлендж не найден.")
-        debug_print(f"📤 edit_challenge_id_input: ВОЗВРАТ END")
         return ConversationHandler.END
     context.user_data['edit_challenge_id'] = challenge_id
     keyboard = [
@@ -2238,20 +1555,15 @@ async def edit_challenge_id_input(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("Отмена", callback_data="cancel_edit_ch")],
     ]
     await update.message.reply_text(f"Редактируем {challenge[1]}:", reply_markup=InlineKeyboardMarkup(keyboard))
-    debug_print(f"📤 edit_challenge_id_input: ВОЗВРАТ EDIT_CHALLENGE_VALUE")
     return EDIT_CHALLENGE_VALUE
 
 
-@log_call
 async def edit_challenge_value_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_challenge_value_input: ВХОД")
-
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         if query.data == "cancel_edit_ch":
             await query.edit_message_text("Отменено.")
-            debug_print(f"📤 edit_challenge_value_input: ВОЗВРАТ END")
             return ConversationHandler.END
         field_map = {
             "chfield_name": "name",
@@ -2263,7 +1575,6 @@ async def edit_challenge_value_input(update: Update, context: ContextTypes.DEFAU
         if field:
             context.user_data['edit_field'] = field
             await query.edit_message_text(f"Введите новое значение для {field}:")
-            debug_print(f"📤 edit_challenge_value_input: ВОЗВРАТ EDIT_CHALLENGE_VALUE")
             return EDIT_CHALLENGE_VALUE
     else:
         text = update.message.text.strip()
@@ -2280,211 +1591,106 @@ async def edit_challenge_value_input(update: Update, context: ContextTypes.DEFAU
         conn.close()
         await update.message.reply_text(f"✅ {field} обновлён на '{value}'")
         context.user_data.clear()
-        debug_print(f"📤 edit_challenge_value_input: ВОЗВРАТ END")
         return ConversationHandler.END
-    debug_print(f"📤 edit_challenge_value_input: ВОЗВРАТ EDIT_CHALLENGE_VALUE")
     return EDIT_CHALLENGE_VALUE
 
 
-@log_call
 async def edit_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 edit_challenge_command: ВХОД")
     await edit_challenge_start(update, context)
-    debug_print(f"📤 edit_challenge_command: ВОЗВРАТ")
 
 
-@log_call
 async def delete_complex_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_complex_start: ВХОД")
-
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Введите ID комплекса для удаления:")
     else:
         await update.message.reply_text("Введите ID комплекса для удаления:")
-    debug_print(f"📤 delete_complex_start: ВОЗВРАТ WAIT_DELETE_COMPLEX_ID")
     return WAIT_DELETE_COMPLEX_ID
 
 
-@log_call
 async def delete_complex_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 delete_complex_get_id: ВХОД")
-    debug_print(f"📨 ТЕКСТ: {update.message.text}")
-
     try:
         complex_id = int(update.message.text)
     except (ValueError, TypeError):
         await update.message.reply_text("ID должен быть числом.")
-        debug_print(f"📤 delete_complex_get_id: ВОЗВРАТ WAIT_DELETE_COMPLEX_ID (не число)")
         return WAIT_DELETE_COMPLEX_ID
     context.user_data['delete_complex_id'] = complex_id
     await update.message.reply_text(f"Удалить комплекс {complex_id}? Отправьте 'ДА'")
-    debug_print(f"📤 delete_complex_get_id: ВОЗВРАТ CONFIRM_DELETE_COMPLEX")
     return CONFIRM_DELETE_COMPLEX
 
 
-@log_call
 async def leave_challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 leave_challenge_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     challenge_id = int(query.data.split('_')[1])
     leave_challenge(update.effective_user.id, challenge_id)
     await query.edit_message_text("✅ Вы вышли из челленджа.")
-    debug_print(f"📤 leave_challenge_callback: ВОЗВРАТ")
 
 
-@log_call
 async def cancel_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 cancel_reply_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     context.user_data.clear()
     await query.edit_message_text("❌ Отменено.")
-    debug_print(f"📤 cancel_reply_callback: ВОЗВРАТ")
 
 
-@log_call
 async def process_reply_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 process_reply_comment: ВХОД")
-    # pass
-    debug_print(f"📤 process_reply_comment: ВОЗВРАТ")
+    pass
 
 
-# ==================== ОБРАБОТЧИК ДИАЛОГА ====================
-@log_call
+# ========== ОБРАБОТЧИК ДИАЛОГА ==========
 async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 catch_all_text: ВХОД")
-
     if not update.message or not update.message.text:
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (нет текста)")
         return
 
     text = update.message.text.strip()
 
-    debug_print(f"📨 ПОЛУЧЕН ТЕКСТ: '{text}'")
-    debug_print(f"📦 user_data: {context.user_data}")
-    debug_print(f"🏷️ состояние: {context.user_data.get('conversation_state')}")
-
-    if DEBUG_MODE:
-        debug_print(
-            f"🔥 catch_all_text: ВХОДЯЩЕЕ СООБЩЕНИЕ: '{update.message.text}' (repr: {repr(update.message.text)})")
-
-    # Обработка "Отмена"
     if text == "❌ Отмена":
-        from utils import handle_cancel
-        result = await handle_cancel(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (Отмена)")
-        return result
-
-    # Получаем состояние диалога
-    state = context.user_data.get('conversation_state')
-    if DEBUG_MODE:
-        debug_print(f"🔥 catch_all_text: text={text}, state={state}")
-
-    # Если есть активный диалог — обрабатываем его
-    if state == 61:  # RESULT
-        await submit_result_input(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (submit_result_input)")
-        return
-    elif state == 62:  # VIDEO
-        await submit_video_input(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (submit_video_input)")
-        return
-    elif state == 63:  # COMMENT
-        await submit_comment_input(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (submit_comment_input)")
-        return
-
-    if text == "❌ Отмена":
-        context.user_data.clear()
         await start(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (Отмена через старт)")
-        return
-
-    if text == "🐞 Отладка":
-        await toggle_debug_button(update, context)
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (Отладка)")
         return
 
     # Игнорируем служебные сообщения
     if "Тренировка успешно записана" in text or "Спасибо" in text:
-        debug_print(f"📤 catch_all_text: ВОЗВРАТ (игнорируем служебное)")
         return
 
     # Всё остальное — в menu_handler
     await menu_handler(update, context)
-    debug_print(f"📤 catch_all_text: ВОЗВРАТ (menu_handler)")
 
 
-@log_call
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 menu_handler: ВХОД")
-
+# ========== ОБРАБОТЧИК ДИАЛОГА ==========
+async def catch_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (нет текста)")
         return
 
     text = update.message.text.strip()
-    debug_print(f"📨 MENU_HANDLER ТЕКСТ: '{text}'")
-    debug_print(f"📦 user_data: {context.user_data}")
 
-    if DEBUG_MODE:
-        debug_print(f"🔥 menu_handler: text={text}")
-
-    # Отмена
     if text == "❌ Отмена":
-        context.user_data.clear()
         await start(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Отмена)")
         return
 
-    # Отладка
-    if text == "🐞 Отладка":
-        await toggle_debug_button(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Отладка)")
+    # Игнорируем служебные сообщения
+    if "Тренировка успешно записана" in text or "Спасибо" in text:
         return
 
-    # Рейтинг
-    if text == "🏆 Рейтинг":
-        await top_command(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Рейтинг)")
+    # Всё остальное — в menu_handler
+    await menu_handler(update, context)
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
         return
 
-    # Админ
-    if text == "⚙️ Админ":
-        if is_admin(update):
-            await admin_menu(update, context)
-        else:
-            await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Админ)")
+    text = update.message.text.strip()
+
+    # Обработка кнопки "Отмена"
+    if text == "❌ Отмена":
+        await start(update, context)
         return
 
-    # Календарь
-    if text == "📅 Календарь":
-        await calendar_command(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Календарь)")
-        return
-
-    # Задать вопрос
-    if text == "🤖 Задать вопрос":
-        await update.message.reply_text("Напиши свой вопрос, и я постараюсь помочь!")
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Задать вопрос)")
-        return
-
-    # Фото
-    if text == "📸 Фото":
-        await show_menu(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Фото)")
-        return
-
-    # Спорт
+    # Кнопка "Спорт" — показываем спортивное меню
     if text == "🏋️ Спорт" or text == "Спорт":
         context.user_data.clear()
         await sport_menu(update, context)
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (Спорт)")
         return ConversationHandler.END
 
     # Остальные кнопки главного меню
@@ -2500,54 +1706,61 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
     else:
         await update.message.reply_text("Я не понимаю эту команду. Воспользуйся меню!")
-        debug_print(f"📤 menu_handler: ВОЗВРАТ (неизвестная команда)")
         return ConversationHandler.END
 
-    debug_print(f"📤 menu_handler: ВОЗВРАТ")
+
+# ========== ОБЩИЕ ФУНКЦИИ ==========
+def paginate(items, page, per_page=5, prefix='page', extra_data=''):
+    total = len(items)
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_items = items[start:end]
+    keyboard = []
+    if page > 1:
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=f"{prefix}_{page - 1}")])
+    if end < total:
+        keyboard.append([InlineKeyboardButton("Вперёд ▶️", callback_data=f"{prefix}_{page + 1}")])
+    return page_items, keyboard
 
 
-# ==================== ОБЩИЕ ФУНКЦИИ ====================
-@log_call
+def get_exercise_icon(name):
+    return "📌"
+
+
 async def testchannel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 testchannel_command: ВХОД")
     await send_to_channel(context.bot, "✅ Тест")
-    debug_print(f"📤 testchannel_command: ВОЗВРАТ")
 
 
-@log_call
 async def testresult_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 testresult_command: ВХОД")
     if update.message:
         await update.message.reply_text("Тест")
-    debug_print(f"📤 testresult_command: ВОЗВРАТ")
 
 
-@log_call
+# ========== СЕРВЕР ==========
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+init_db()
+backup_database()
+Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthCheckHandler).serve_forever(),
+       daemon=True).start()
+
 async def join_challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 join_challenge_callback: ВХОД")
-
     query = update.callback_query
     await query.answer()
     data = query.data
-    logger.debug(f"🔹 join_challenge_callback: {data}")
+    print(f"🔹 join_challenge_callback: {data}")
     challenge_id = int(data.split('_')[2])
     await query.edit_message_text(f"Вы присоединились к челленджу #{challenge_id}")
-    debug_print(f"📤 join_challenge_callback: ВОЗВРАТ")
 
-
-@log_call
 async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    debug_print(f"🔥 do_exercise_callback: ВХОД")
-    debug_print(f"📨 ПОЛУЧЕН CALLBACK: {data}")
-    debug_print(f"📦 user_data: {context.user_data}")
-    debug_print(f"🏷️ состояние: {context.user_data.get('conversation_state')}")
-
-    if DEBUG_MODE:
-        debug_print(f"🔥 do_exercise_callback: data={data}")
 
     if data == "cancel_catalog":
         await query.edit_message_text("❌ Отменено.")
@@ -2555,11 +1768,10 @@ async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ["🏋️ Спорт", "📸 Фото"],
             ["🤖 Задать вопрос", "❌ Отмена"],
             ["🏆 Рейтинг", "⚙️ Админ"],
-            ["📅 Календарь", "🐞 Отладка"],
+            ["📅 Календарь"],
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await query.message.reply_text(WELCOME_TEXT, reply_markup=reply_markup, parse_mode='Markdown')
-        debug_print(f"📤 do_exercise_callback: ВОЗВРАТ (cancel_catalog)")
         return
 
     exercise_id = int(data.split('_')[2])
@@ -2567,34 +1779,16 @@ async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['submit_entity_type'] = 'exercise'
     context.user_data['submit_entity_id'] = exercise_id
     state = await workout_start(update, context)
-    if DEBUG_MODE:
-        debug_print(f"🔥 do_exercise_callback: workout_start вернул {state}")
     if state:
         context.user_data['conversation_state'] = state
 
-    debug_print(f"📤 do_exercise_callback: ВОЗВРАТ")
-
-
-@log_call
 async def catalog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 catalog_command: ВХОД")
     await send_catalog_to_message(update, context)
-    debug_print(f"📤 catalog_command: ВОЗВРАТ")
 
-
-@log_call
 async def do_complex_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    debug_print(f"🔥 do_complex_callback: ВХОД")
-    debug_print(f"📨 ПОЛУЧЕН CALLBACK: {data}")
-    debug_print(f"📦 user_data: {context.user_data}")
-    debug_print(f"🏷️ состояние: {context.user_data.get('conversation_state')}")
-
-    if DEBUG_MODE:
-        debug_print(f"🔥 do_complex_callback: data={data}")
     complex_id = int(data.split('_')[2])
     context.user_data['pending_complex'] = complex_id
     context.user_data['submit_entity_type'] = 'complex'
@@ -2602,153 +1796,14 @@ async def do_complex_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     state = await workout_start(update, context)
     if state:
         context.user_data['conversation_state'] = state
-    debug_print(f"📤 do_complex_callback: ВОЗВРАТ")
 
-
-# ==================== СЕРВЕР ====================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-# ==================== КОМАНДЫ ДЛЯ УПРАЖНЕНИЙ ====================
-@log_call
-async def add_exercise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 add_exercise_command: ВХОД")
-
-    if not is_admin(update):
-        await update.message.reply_text("⛔ Нет прав.")
-        debug_print(f"📤 add_exercise_command: ВОЗВРАТ (нет прав)")
-        return
-    full_text = update.message.text
-    if ' ' not in full_text:
-        await update.message.reply_text(
-            "Использование: /addexercise <название> <reps|time> <описание> <баллы> [неделя] [difficulty]")
-        debug_print(f"📤 add_exercise_command: ВОЗВРАТ (недостаточно аргументов)")
-        return
-    args_part = full_text.split(maxsplit=1)[1]
-    try:
-        args = shlex.split(args_part)
-        if len(args) < 4:
-            await update.message.reply_text("❌ Нужно минимум 4 аргумента.")
-            debug_print(f"📤 add_exercise_command: ВОЗВРАТ (мало аргументов)")
-            return
-        name, metric, desc, points = args[0], args[1], args[2], int(args[3])
-        week = int(args[4]) if len(args) > 4 and args[4].isdigit() else 0
-        diff = args[5] if len(args) > 5 else 'beginner'
-        if add_exercise(name, desc, metric, points, week, diff):
-            await update.message.reply_text(f"✅ Упражнение '{name}' добавлено.")
-        else:
-            await update.message.reply_text(format_error("Ошибка добавления."))
-    except Exception as e:
-        await update.message.reply_text(format_error(f"Ошибка парсинга: {e}"))
-
-    debug_print(f"📤 add_exercise_command: ВОЗВРАТ")
-
-
-@log_call
-async def list_exercises_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 list_exercises_command: ВХОД")
-
-    if not is_admin(update):
-        debug_print(f"📤 list_exercises_command: ВОЗВРАТ (нет прав)")
-        return
-    page = 1
-    if context.args and context.args[0].isdigit():
-        page = int(context.args[0])
-    all_exercises = get_all_exercises()
-    if not all_exercises:
-        await update.message.reply_text("Упражнений пока нет.")
-        debug_print(f"📤 list_exercises_command: ВОЗВРАТ (нет упражнений)")
-        return
-    exercises, keyboard = paginate(all_exercises, page, per_page=5, prefix='ex_page')
-    text = "📋 **Список упражнений:**\n\n"
-    for ex in exercises:
-        name = ex[1].replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace(']', r'\]')
-        text += f"🔹 ID: {ex[0]} — {name} ({ex[5]})\n"
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
-    debug_print(f"📤 list_exercises_command: ВОЗВРАТ")
-
-
-@log_call
-async def load_exercises_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 load_exercises_command: ВХОД")
-
-    if not is_admin(update):
-        debug_print(f"📤 load_exercises_command: ВОЗВРАТ (нет прав)")
-        return
-    try:
-        with open('exercises.json', 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for ex in data:
-                add_exercise(ex['name'], ex.get('description', ''), ex['metric'], ex['points'], ex.get('week', 0),
-                             ex.get('difficulty', 'beginner'))
-        await update.message.reply_text("✅ Загружено.")
-    except Exception as e:
-        await update.message.reply_text(format_error(f"Ошибка: {e}"))
-    debug_print(f"📤 load_exercises_command: ВОЗВРАТ")
-
-
-@log_call
-async def myhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_print(f"🔥 myhistory_command: ВХОД")
-
-    user_id = update.effective_user.id
-    limit = 20
-    if context.args and context.args[0].isdigit():
-        limit = int(context.args[0])
-        if limit > 50:
-            limit = 50
-    workouts = get_user_workouts(user_id, limit)
-    if not workouts:
-        await update.message.reply_text("Нет тренировок.")
-        debug_print(f"📤 myhistory_command: ВОЗВРАТ (нет тренировок)")
-        return
-    text = f"📋 **Твои последние {len(workouts)} тренировок:**\n\n"
-    for w in workouts:
-        wid, name, result, video, date, is_best, typ, comment = w
-        date_str = datetime.fromisoformat(date).strftime("%d.%m.%Y %H:%M")
-        best_mark = " 🏆" if is_best else ""
-        line = f"• {date_str} — **{name}** ({typ}): {result} [ссылка]({video}){best_mark}"
-        if comment:
-            line += f"\n   💬 {comment}"
-        text += line + "\n"
-        if len(text) > 3500:
-            text += "\n...и ещё"
-            break
-    await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=True)
-    debug_print(f"📤 myhistory_command: ВОЗВРАТ")
-
-# ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
-@log_call
+# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 def main():
-    global DEBUG_MODE
-    logger.info("🚀 MAIN: запуск бота")
-    debug_print(f"🔥 main: ВХОД")
-
+    logger.info("MAIN: started")
     if not TOKEN:
         raise ValueError("Нет TELEGRAM_BOT_TOKEN!")
 
-    # Загружаем сохранённое состояние дебага из БД
-    saved_debug = get_setting("debug_mode")
-    if saved_debug is not None:
-        DEBUG_MODE = saved_debug.lower() == 'true'
-        logger.info(f"📂 Загружен DEBUG_MODE из БД: {DEBUG_MODE}")
-
     app = Application.builder().token(TOKEN).build()
-
-    # Глобальный перехватчик для дебага (самый первый!)
-    # КОММЕНТИРУЕМ ЭТИ СТРОКИ:
-    # app.add_handler(MessageHandler(filters.ALL, debug_global_handler), group=-1)
-    # app.add_handler(CallbackQueryHandler(debug_global_handler, pattern='.*'), group=-1)
-    #
-    # async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    #     debug_print(f"🌍 ГЛОБАЛЬНО: {update}")
-    #     return
-    #
-    # app.add_handler(MessageHandler(filters.ALL, log_all_updates), group=-1)
 
     # Команды
     app.add_handler(CommandHandler("start", start))
@@ -2757,7 +1812,6 @@ def main():
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("config", config_command))
-    app.add_handler(CommandHandler("toggle_debug", toggle_debug_command))
     app.add_handler(CommandHandler("addexercise", add_exercise_command))
     app.add_handler(CommandHandler("listexercises", list_exercises_command))
     app.add_handler(CommandHandler("load_exercises", load_exercises_command))
@@ -2785,26 +1839,19 @@ def main():
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("testchannel", testchannel_command))
     app.add_handler(CommandHandler("comment", comment_command))
-    # /skip используется в submit-потоке (комментарий к видео) при отсутствии ConversationHandler
-    app.add_handler(CommandHandler("skip", submit_comment_skip))
     app.add_handler(CommandHandler("testresult", testresult_command))
-
-    # Callback handlers для упражнений и комплексов
     app.add_handler(CallbackQueryHandler(do_exercise_callback, pattern='^do_exercise_'))
-    app.add_handler(CallbackQueryHandler(do_exercise_callback, pattern='^complex_ex_'))  # Добавлен для комплексов
     app.add_handler(CallbackQueryHandler(do_complex_callback, pattern='^do_complex_'))
-    app.add_handler(
-        CallbackQueryHandler(toggle_debug_callback_handler, pattern='^(toggle_debug_callback|cancel_debug)$'))
 
     # ConversationHandlers
-    app.add_handler(ConversationHandler(
+    app.add_handler(edit_complex_conv := ConversationHandler(
         entry_points=[CommandHandler('editcomplex', edit_complex_command)],
         states={EDIT_COMPLEX_ID: [CallbackQueryHandler(edit_complex_field_callback, pattern='^cfield_|cancel_edit')],
                 EDIT_COMPLEX_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_complex_value_input)]},
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(edit_exercise_conv := ConversationHandler(
         entry_points=[CommandHandler('editexercise', edit_exercise_command),
                       CallbackQueryHandler(edit_exercise_start, pattern='^admin_ex_edit$')],
         states={EDIT_EXERCISE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_exercise_id_input)],
@@ -2814,7 +1861,7 @@ def main():
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(admin_add_exercise_conv := ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_exercise_add_start, pattern='^admin_ex_add$')],
         states={
             EXERCISE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_exercise_add_name)],
@@ -2827,7 +1874,7 @@ def main():
         fallbacks=[CommandHandler('cancel', admin_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(complex_conv := ConversationHandler(
         entry_points=[CallbackQueryHandler(do_complex_start, pattern='^do_complex_\\d+$')],
         states={COMPLEX_RESULT: [MessageHandler(filters.TEXT & ~filters.COMMAND, complex_result_input)],
                 COMPLEX_VIDEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, complex_video_input),
@@ -2839,26 +1886,20 @@ def main():
 
     app.add_handler(workout_conv := ConversationHandler(
         entry_points=[CommandHandler('wod', workout_start)],
-        states={
-            EXERCISE: [CallbackQueryHandler(exercise_choice, pattern='^ex_|^cancel$')],
-            RESULT: [MessageHandler(filters.TEXT & ~filters.COMMAND, result_input)],
-            VIDEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, video_input)],
-            COMMENT: [
-                CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'),
-                MessageHandler(filters.TEXT, comment_handler),
-            ],
-            COMPLEX_EXERCISE: [
-                CallbackQueryHandler(workout_cancel, pattern='^cancel_complex$'),
-                CallbackQueryHandler(do_exercise_callback, pattern='^complex_ex_'),
-            ]},
+        states={EXERCISE: [CallbackQueryHandler(exercise_choice, pattern='^ex_|^cancel$')],
+                RESULT: [MessageHandler(filters.TEXT & ~filters.COMMAND, result_input)],
+                VIDEO: [MessageHandler(filters.TEXT & ~filters.COMMAND, video_input)],
+                COMMENT: [
+                    CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'),
+                    MessageHandler(filters.TEXT, comment_handler),
+                ]},
         fallbacks=[
             CommandHandler('cancel', workout_cancel),
-            MessageHandler(filters.Regex('^❌ Отмена$'), workout_cancel),
-            MessageHandler(filters.Regex('^(🏋️ Спорт|Спорт)$'), menu_handler),
+            MessageHandler(filters.Regex('^Спорт$'), menu_handler)
         ],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(newcomplex_conv := ConversationHandler(
         entry_points=[CommandHandler('newcomplex', newcomplex_start),
                       CallbackQueryHandler(newcomplex_start, pattern='^admin_cx_add$')],
         states={COMPLEX_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, complex_name_input)],
@@ -2871,7 +1912,7 @@ def main():
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(challenge_conv := ConversationHandler(
         entry_points=[CommandHandler('addchallenge', addchallenge_start),
                       CallbackQueryHandler(addchallenge_start, pattern='^admin_ch_add$')],
         states={CHALL_NAME: [MessageHandler(filters.TEXT, challenge_name_input)],
@@ -2886,7 +1927,7 @@ def main():
         per_user=True, per_chat=True,
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(confirm_conv := ConversationHandler(
         entry_points=[CommandHandler('delexercise', delete_exercise_command),
                       CallbackQueryHandler(delete_exercise_start, pattern='^admin_ex_delete$')],
         states={WAIT_DELETE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_exercise_get_id)],
@@ -2894,7 +1935,7 @@ def main():
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(delete_complex_conv := ConversationHandler(
         entry_points=[CommandHandler('deletecomplex', delete_complex_command),
                       CallbackQueryHandler(delete_complex_start, pattern='^admin_cx_delete$')],
         states={WAIT_DELETE_COMPLEX_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_complex_get_id)],
@@ -2902,14 +1943,14 @@ def main():
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(delete_challenge_conv := ConversationHandler(
         entry_points=[CallbackQueryHandler(delete_challenge_start, pattern='^admin_ch_delete$')],
         states={WAIT_DELETE_CHALLENGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_challenge_get_id)],
                 CONFIRM_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_delete_challenge)]},
         fallbacks=[CommandHandler('cancel', workout_cancel)],
     ))
 
-    app.add_handler(ConversationHandler(
+    app.add_handler(edit_challenge_conv := ConversationHandler(
         entry_points=[CommandHandler('editchallenge', edit_challenge_command),
                       CallbackQueryHandler(edit_challenge_start, pattern='^admin_ch_edit$')],
         states={EDIT_CHALLENGE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_challenge_id_input)],
@@ -2952,16 +1993,8 @@ def main():
     app.add_error_handler(error_handler)
 
     init_db()
-    # fix_scoreboard_duplicates()  # <--- ДОБАВЬ ЭТУ СТРОКУ
     backup_database()
-
-    # Запуск healthcheck сервера
-    Thread(
-        target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthCheckHandler).serve_forever(),
-        daemon=True).start()
-
     app.run_polling()
-    debug_print(f"📤 main: ВОЗВРАТ")
 
 
 if __name__ == "__main__":
