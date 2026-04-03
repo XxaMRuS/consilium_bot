@@ -3066,15 +3066,10 @@ from aiohttp import web
 async def health_handler(request):
     return web.Response(text="OK")
 
-# ✅ ПОДДЕРЖКА HEAD (те же 3 строки)
-async def health_head_handler(request):
-    return web.Response(text="OK")
-
 app_web = web.Application()
 app_web.router.add_get('/health', health_handler)
-app_web.router.add_head('/health', health_head_handler)  # ← ЭТА СТРОКА
-app_web.router.add_get('/', health_handler)  # ← И ЭТА (для корня)
-app_web.router.add_head('/', health_head_handler)  # ← И ЭТА
+app_web.router.add_get('/', health_handler)
+# Не нужно явно добавлять HEAD — aiohttp сделает это сам
 
 def run_health_server():
     import asyncio
