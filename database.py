@@ -1347,12 +1347,10 @@ def add_points_to_scoreboard(user_id, points, period='total'):
     debug_print(f"🔥 БД: add_points_to_scoreboard: points={points}")
     debug_print(f"🔥 БД: add_points_to_scoreboard: period={period}")
 
-    if DEBUG_MODE:
-        debug_print(f"🔹 БД: add_points_to_scoreboard вызвана с user_id={user_id}, points={points}, period={period}")
-
     conn = get_connection()
     cur = conn.cursor()
 
+    # Проверяем, есть ли уже запись
     if IS_POSTGRES:
         query = """
                 INSERT INTO scoreboard (user_id, period, points)
@@ -1361,25 +1359,21 @@ def add_points_to_scoreboard(user_id, points, period='total'):
                 UPDATE SET points = scoreboard.points + EXCLUDED.points \
                 """
         params = (user_id, period, points)
+        cur.execute(query, params)
     else:
-        # SQLite: сначала проверяем, есть ли запись
+        # SQLite — сначала проверяем существующую запись
         cur.execute("SELECT points FROM scoreboard WHERE user_id = ? AND period = ?", (user_id, period))
         row = cur.fetchone()
 
         if row:
             # Обновляем существующую запись
             new_points = row[0] + points
-            query = "UPDATE scoreboard SET points = ? WHERE user_id = ? AND period = ?"
-            params = (new_points, user_id, period)
+            cur.execute("UPDATE scoreboard SET points = ? WHERE user_id = ? AND period = ?",
+                        (new_points, user_id, period))
         else:
             # Создаём новую запись
-            query = "INSERT INTO scoreboard (user_id, period, points) VALUES (?, ?, ?)"
-            params = (user_id, period, points)
+            cur.execute("INSERT INTO scoreboard (user_id, period, points) VALUES (?, ?, ?)", (user_id, period, points))
 
-    debug_print(f"🔥 БД: SQL: {query}")
-    debug_print(f"🔥 БД: params={params}")
-
-    cur.execute(query, params)
     conn.commit()
     conn.close()
 

@@ -2924,6 +2924,7 @@ def main():
     app.add_handler(CallbackQueryHandler(submit_complex_callback, pattern='^submit_complex_'))
     app.add_handler(CallbackQueryHandler(submit_exercise_callback, pattern='^submit_exercise_'))
     app.add_handler(CallbackQueryHandler(submit_challenge_callback, pattern='^submit_challenge_'))
+    app.add_handler(CallbackQueryHandler(skip_comment_callback, pattern='^skip_comment$'))
     app.add_handler(CallbackQueryHandler(button_handler,
                                          pattern='^(sketch|anime|sepia|hardrock|pixel|neon|oil|watercolor|cartoon)$'))
     app.add_handler(CallbackQueryHandler(config_callback_handler, pattern="^toggle_"))

@@ -523,3 +523,17 @@ async def cancel_submit_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text("❌ Ввод результата отменён.")
     logger.info("Ввод результата отменён")
     debug_print(f"🔥 cancel_submit_callback: ВОЗВРАТ None")
+
+
+@log_call
+async def skip_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback для кнопки пропуска комментария"""
+    debug_print(f"🔥 skip_comment_callback: ВЫЗВАНА")
+
+    query = update.callback_query
+    await query.answer()
+
+    debug_print(f"🔥 skip_comment_callback: пропуск комментария")
+    await finalize_submit(update, context, None)
+
+    debug_print(f"🔥 skip_comment_callback: ВОЗВРАТ")
