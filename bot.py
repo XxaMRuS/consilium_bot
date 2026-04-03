@@ -3041,6 +3041,25 @@ def main():
     app.run_polling()
     debug_print(f"📤 main: ВОЗВРАТ")
 
+    # Простой HTTP-сервер для UptimeRobot
+    from aiohttp import web
+
+    async def health_check(request):
+        return web.Response(text="OK", status=200)
+
+    async def start_health_server():
+        app = web.Application()
+        app.router.add_get('/health', health_check)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        print("✅ Health check server started on port 8080")
+
+    # Запускаем health-сервер отдельно
+    import asyncio
+    asyncio.create_task(start_health_server())
+
 
 if __name__ == "__main__":
     try:
