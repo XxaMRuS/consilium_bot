@@ -3060,6 +3060,27 @@ def main():
     import asyncio
     asyncio.create_task(start_health_server())
 
+# ========== HEALTH CHECK ДЛЯ RENDER ==========
+from aiohttp import web
+
+async def health_handler(request):
+    return web.Response(text="OK")
+
+app_web = web.Application()
+app_web.router.add_get('/health', health_handler)
+
+def run_health_server():
+    import asyncio
+    import os
+    port = int(os.environ.get('PORT', 8080))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    web.run_app(app_web, host='0.0.0.0', port=port)
+
+import threading
+threading.Thread(target=run_health_server, daemon=True).start()
+# ============================================
+
 
 if __name__ == "__main__":
     try:
