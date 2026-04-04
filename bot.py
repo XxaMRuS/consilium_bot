@@ -2909,6 +2909,11 @@ def main():
     if not TOKEN:
         raise ValueError("Нет TELEGRAM_BOT_TOKEN!")
 
+    # Принудительно создаём таблицы
+    from database_backup import init_db
+    init_db()
+    logger.info("База данных инициализирована")
+
     # Загружаем сохранённое состояние дебага из БД
     saved_debug = get_setting("debug_mode")
     if saved_debug is not None:
