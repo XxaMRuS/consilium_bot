@@ -28,9 +28,10 @@ async def sport_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📋 Все упражнения", callback_data='sport_catalog')],
             [InlineKeyboardButton("📦 Комплексы", callback_data='sport_complexes')],
             [InlineKeyboardButton("🏆 Челленджи", callback_data='sport_challenges')],
+            [InlineKeyboardButton("📋 Мои челленджи", callback_data='sport_my_challenges')],  # ← НОВАЯ
             [InlineKeyboardButton("🔥 Тренировка недели", callback_data='sport_wod')],
             [InlineKeyboardButton("📊 Статистика", callback_data='sport_mystats')],
-            [InlineKeyboardButton("🏆 Топы и рекорды", callback_data='public_stats')],  # ← НОВАЯ КНОПКА
+            [InlineKeyboardButton("🏆 Топы и рекорды", callback_data='public_stats')],
             [InlineKeyboardButton("🔄 Уровень", callback_data='sport_setlevel')],
             [InlineKeyboardButton("◀️ Назад", callback_data='back_to_main')]
         ]
@@ -63,6 +64,8 @@ def main_menu_keyboard():
             [InlineKeyboardButton("📊 Моя статистика", callback_data="mystats")],
             [InlineKeyboardButton("🏆 Таблица лидеров", callback_data="top")],
             [InlineKeyboardButton("📅 Календарь активности", callback_data="calendar")],
+            [InlineKeyboardButton("🤖 Спросить AI", callback_data="ask_ai")],
+            [InlineKeyboardButton("👨‍💼 Задать вопрос администратору", callback_data="ask_admin")],
             [InlineKeyboardButton("❓ Помощь", callback_data="help")],
         ]
 

@@ -1023,7 +1023,7 @@ def delete_exercise(exercise_id):
 # ========== ФУНКЦИИ ДЛЯ ТРЕНИРОВОК ==========
 
 @log_call
-def add_workout(user_id, exercise_id=None, complex_id=None, result_value=None, video_link=None,
+def add_workout(user_id, exercise_id=None, complex_id=None, challenge_id=None, result_value=None, video_link=None,
                 user_level=None, comment=None, metric=None, notify_record_callback=None):
     """Добавляет тренировку и начисляет баллы"""
     debug_print(f"🔥 БД: add_workout: ВЫЗВАНА")
@@ -1052,12 +1052,26 @@ def add_workout(user_id, exercise_id=None, complex_id=None, result_value=None, v
         points = ex[4] if len(ex) > 4 else 0
         workout_type = "exercise"
         workout_metric = metric
+    elif challenge_id:
+        # Получаем информацию о челлендже
+        ch = get_challenge_by_id(challenge_id)
+        if not ch:
+            conn.close()
+            debug_print(f"🔥 БД: add_workout: ВОЗВРАТ (None, []) - челлендж не найден")
+            return None, []
+        points = ch[8] if len(ch) > 8 else 0  # бонусные баллы
+        workout_type = "challenge"
+        workout_metric = metric
     else:
         # Это комплекс
         complex_data = get_complex_by_id(complex_id)
-        points = complex_data[4] if complex_data else 0
+        if not complex_data:
+            conn.close()
+            debug_print(f"🔥 БД: add_workout: ВОЗВРАТ (None, []) - комплекс не найден")
+            return None, []
+        points = complex_data[4] if len(complex_data) > 4 else 0
         workout_type = "complex"
-        workout_metric = None
+        workout_metric = metric
 
     # Вставляем тренировку
     if IS_POSTGRES:
@@ -1342,6 +1356,13 @@ def get_complex_exercises(complex_id):
 @log_call
 def add_points_to_scoreboard(user_id, points, period='total'):
     """Добавляет баллы пользователю в scoreboard"""
+    # Преобразуем points в int, если пришла строка
+    if isinstance(points, str):
+        try:
+            points = int(points)
+        except ValueError:
+            debug_print(f"🔥 БД: add_points_to_scoreboard: ОШИБКА - points='{points}' не число, пропускаем")
+            return
     debug_print(f"🔥 БД: add_points_to_scoreboard: ВЫЗВАНА")
     debug_print(f"🔥 БД: add_points_to_scoreboard: user_id={user_id}")
     debug_print(f"🔥 БД: add_points_to_scoreboard: points={points}")
@@ -1454,7 +1475,6 @@ def get_leaderboard_from_scoreboard(period='total'):
 
 # ========== ФУНКЦИИ ДЛЯ ЧЕЛЛЕНДЖЕЙ ==========
 
-@log_call
 def add_challenge(name, description, target_type, target_id, metric, target_value,
                   start_date, end_date, bonus_points):
     """Добавляет челлендж"""
@@ -1491,16 +1511,31 @@ def add_challenge(name, description, target_type, target_id, metric, target_valu
         debug_print(f"🔥 БД: params={params}")
 
         cur.execute(query, params)
+
+        # Получаем ID созданного челленджа
+        if IS_POSTGRES:
+            cur.execute("SELECT LASTVAL()")
+        else:
+            challenge_id = cur.lastrowid
+            if not IS_POSTGRES:
+                challenge_id = cur.lastrowid
+            else:
+                challenge_id = cur.fetchone()[0]
+
+        # Сохраняем призовой фонд в prize_pool
+        cur.execute("""
+                    INSERT INTO prize_pool (entity_type, entity_id, total_points, distribution)
+                    VALUES (?, ?, ?, ?)
+                    """, ('challenge', challenge_id, bonus_points, '70,20,10'))
+
         conn.commit()
         return True
     except Exception as e:
         debug_print(f"🔥 БД: ОШИБКА: {e}")
         debug_print(f"🔥 БД: traceback: {traceback.format_exc()}")
-        logger.error(f"Ошибка добавления челленджа: {e}")
         return False
     finally:
         conn.close()
-
 
 @log_call
 def get_challenge_by_id(challenge_id):
@@ -1887,22 +1922,7 @@ def complete_challenge(user_id, challenge_id):
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Получаем бонус
-        if IS_POSTGRES:
-            query = "SELECT bonus_points FROM challenges WHERE id = %s"
-            params = (challenge_id,)
-        else:
-            query = "SELECT bonus_points FROM challenges WHERE id = ?"
-            params = (challenge_id,)
-
-        debug_print(f"🔥 БД: SQL: {query}")
-        debug_print(f"🔥 БД: params={params}")
-
-        cur.execute(query, params)
-        row = cur.fetchone()
-        bonus = row[0] if row else 0
-
-        # Отмечаем челлендж как завершённый
+        # Отмечаем челлендж как завершённый для этого пользователя
         if IS_POSTGRES:
             query = "UPDATE user_challenges SET completed = TRUE, completed_at = CURRENT_TIMESTAMP WHERE user_id = %s AND challenge_id = %s"
             params = (user_id, challenge_id)
@@ -1912,21 +1932,20 @@ def complete_challenge(user_id, challenge_id):
 
         debug_print(f"🔥 БД: SQL: {query}")
         debug_print(f"🔥 БД: params={params}")
-
         cur.execute(query, params)
-
-        # Начисляем бонус
-        add_points_to_scoreboard(user_id, bonus)
-
         conn.commit()
-        return True
+
     except Exception as e:
         debug_print(f"🔥 БД: ОШИБКА: {e}")
-        debug_print(f"🔥 БД: traceback: {traceback.format_exc()}")
-        logger.error(f"Ошибка завершения челленджа: {e}")
-        return False
-    finally:
         conn.close()
+        return False
+
+    conn.close()
+
+    # Распределяем призовой фонд среди топ-3
+    distribute_bonus_for_entity('challenge', challenge_id)
+
+    return True
 
 
 # ========== ФУНКЦИИ ДЛЯ ДОСТИЖЕНИЙ ==========
@@ -2407,3 +2426,71 @@ def fix_scoreboard_duplicates():
     debug_print("🔥 БД: fix_scoreboard_duplicates: ВОЗВРАТ None")
     return None
 
+
+@log_call
+def distribute_bonus_for_entity(entity_type, entity_id):
+    """Распределяет бонусные очки топ-3 участникам челленджа или комплекса (70/20/10)"""
+    debug_print(f"🔥 distribute_bonus_for_entity: {entity_type} {entity_id}")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Получаем призовой фонд из самой сущности
+    if entity_type == 'challenge':
+        cur.execute("SELECT bonus_points FROM challenges WHERE id = ?", (entity_id,))
+        row = cur.fetchone()
+        if not row:
+            debug_print(f"🔥 Челлендж {entity_id} не найден")
+            conn.close()
+            return
+        total_points = row[0]
+
+        # Получаем топ-3 участников челленджа
+        cur.execute("""
+                    SELECT user_id, current_value
+                    FROM user_challenge_progress
+                    WHERE challenge_id = ?
+                    ORDER BY CAST(current_value AS INTEGER) DESC LIMIT 3
+                    """, (entity_id,))
+
+    elif entity_type == 'complex':
+        cur.execute("SELECT points FROM complexes WHERE id = ?", (entity_id,))
+        row = cur.fetchone()
+        if not row:
+            debug_print(f"🔥 Комплекс {entity_id} не найден")
+            conn.close()
+            return
+        total_points = row[0]
+
+        # Получаем топ-3 участников комплекса
+        cur.execute("""
+                    SELECT user_id, result_value, metric
+                    FROM workouts
+                    WHERE complex_id = ?
+                    ORDER BY CASE WHEN metric = 'reps' THEN CAST(result_value AS INTEGER) ELSE 0 END DESC,
+                             CASE WHEN metric = 'time' THEN CAST(result_value AS INTEGER) ELSE 999999 END ASC LIMIT 3
+                    """, (entity_id,))
+    else:
+        debug_print(f"🔥 Неподдерживаемый тип: {entity_type}")
+        conn.close()
+        return
+
+    top_users = cur.fetchall()
+    conn.close()
+
+    if not top_users:
+        debug_print(f"🔥 Нет участников для {entity_type} {entity_id}")
+        return
+
+    # Распределяем 70/20/10
+    distribution = [70, 20, 10]
+
+    for i, user_data in enumerate(top_users):
+        if i >= len(distribution):
+            break
+        user_id = user_data[0]
+        bonus = int(total_points * distribution[i] / 100)
+        add_points_to_scoreboard(user_id, bonus)
+        debug_print(f"🔥 Пользователь {user_id} получил бонус {bonus} ({distribution[i]}%) за {entity_type} {entity_id}")
+
+    debug_print(f"🔥 Бонусы распределены для {entity_type} {entity_id}")

@@ -634,26 +634,18 @@ async def comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @log_call
 async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    debug_print(f"🔥 comment_handler: text='{text}'")
+    debug_print(f"🔥 comment_handler: ВЫЗВАНА")
+    text = update.message.text
 
-    # Если нет активной тренировки в user_data, просто игнорируем
-    if not context.user_data.get('exercise_id'):
-        debug_print("🔥 comment_handler: нет активной тренировки, игнорируем")
-        await update.message.reply_text(
-            "❌ Нет активной тренировки для добавления комментария. Начните новую тренировкой командой /wod")
-        return ConversationHandler.END
+    if text == "❌ Отмена":
+        from utils import handle_cancel
+        return await handle_cancel(update, context)
 
-    if text.lower() == '/skip':
-        return await comment_skip(update, context)
-    if text in ("🏋️ Спорт", "Спорт"):
-        context.user_data.clear()
-        from menu_handlers import sport_menu
-        await sport_menu(update, context)
-        debug_print(f"🔥 comment_handler: ВОЗВРАТ {ConversationHandler.END}")
-        return ConversationHandler.END
-    debug_print(f"🔥 comment_handler: ВОЗВРАТ {await comment_input(update, context)}")
-    return await comment_input(update, context)
+    # Импортируем finalize_submit из submit_handlers
+    from submit_handlers import finalize_submit
+
+    debug_print(f"🔥 comment_handler: вызов finalize_submit с comment={text}")
+    return await finalize_submit(update, context, comment=text)
 
 
 @log_call
@@ -662,8 +654,12 @@ async def skip_comment_finalize(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("✅ Тренировка сохранена без комментария.")
-    debug_print(f"🔥 skip_comment_finalize: ВОЗВРАТ {await _finalize_workout(update, context, comment=None)}")
-    return await _finalize_workout(update, context, comment=None)
+
+    # Импортируем finalize_submit из submit_handlers
+    from submit_handlers import finalize_submit
+
+    debug_print(f"🔥 skip_comment_finalize: вызов finalize_submit с comment=None")
+    return await finalize_submit(update, context, comment=None)
 
 
 @log_call
@@ -690,19 +686,24 @@ async def complex_exercise_choice(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     data = query.data
+    print(f"🔥🔥🔥 complex_exercise_choice ВЫЗВАНА, data={data}")  # ← ДОБАВЬ ЭТУ СТРОКУ
 
-    # data имеет формат: complex_ex_{ex_id}_{complex_id}_{reps}
     parts = data.split("_")
     ex_id = int(parts[2])
     complex_id = int(parts[3])
     reps = int(parts[4])
 
-    # Сохраняем в user_data
+    # Сохраняем список выполненных упражнений
+    if 'completed_exercises' not in context.user_data:
+        context.user_data['completed_exercises'] = []
+    if ex_id not in context.user_data['completed_exercises']:
+        context.user_data['completed_exercises'].append(ex_id)
+    debug_print(f"🔥 completed_exercises после добавления: {context.user_data['completed_exercises']}")
+
     context.user_data['exercise_id'] = ex_id
     context.user_data['current_complex_id'] = complex_id
     context.user_data['complex_reps'] = reps
 
-    # Получаем метрику упражнения
     exercise = get_exercise_by_id(ex_id)
     if not exercise:
         await query.edit_message_text("❌ Упражнение не найдено")
@@ -711,8 +712,6 @@ async def complex_exercise_choice(update: Update, context: ContextTypes.DEFAULT_
     metric = exercise[3]
     context.user_data['metric'] = metric
 
-    # Запрашиваем результат
-    # ✅ Inline клавиатура с кнопкой отмены
     cancel_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
     ])

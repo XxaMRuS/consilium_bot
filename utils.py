@@ -29,7 +29,7 @@ async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_print(f"🔥 utils: handle_cancel: создание главного меню (ReplyKeyboardMarkup)")
     keyboard = [
         ["🏋️ Спорт", "📸 Фото"],
-        ["🤖 Задать вопрос", "❌ Отмена"],
+        ["🤖 Спросить AI", "❌ Отмена"],
         ["🏆 Рейтинг", "⚙️ Админ"],
         ["📅 Календарь"],
     ]

@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import logging
 import json
 import os
@@ -77,7 +77,7 @@ def init_db():
             period_start TIMESTAMP NOT NULL,
             period_end TIMESTAMP NOT NULL,
             rank INTEGER NOT NULL,
-            points_awarded INTEGER NOT NULL,
+            points INTEGER NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(user_id),
             FOREIGN KEY(exercise_id) REFERENCES exercises(id)
         )
@@ -507,9 +507,9 @@ def get_leaderboard(period=None, level=None, limit=10):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     query = """
-        SELECT u.user_id, u.first_name, u.username, SUM(e.points) as total
+        SELECT u.id, u.first_name, u.username, SUM(e.points) as total
         FROM workouts w
-        JOIN users u ON w.user_id = u.user_id
+        JOIN users u ON w.user_id = u.id
         JOIN exercises e ON w.exercise_id = e.id
         WHERE 1=1
     """
@@ -526,7 +526,7 @@ def get_leaderboard(period=None, level=None, limit=10):
             query += " AND strftime('%m', w.performed_at) = strftime('%m', 'now') AND strftime('%Y', w.performed_at) = strftime('%Y', 'now')"
         elif period == 'year':
             query += " AND strftime('%Y', w.performed_at) = strftime('%Y', 'now')"
-    query += " GROUP BY u.user_id ORDER BY total DESC LIMIT ?"
+    query += " GROUP BY u.id ORDER BY total DESC LIMIT ?"
     params.append(limit)
     cur.execute(query, params)
     results = cur.fetchall()
@@ -562,7 +562,7 @@ def get_user_scoreboard_total(user_id):
     """Возвращает общее количество баллов пользователя из scoreboard."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT SUM(points_awarded) FROM scoreboard WHERE user_id = ?", (user_id,))
+    cur.execute("SELECT SUM(points) FROM scoreboard WHERE user_id = ?", (user_id,))
     total = cur.fetchone()[0]
     conn.close()
     return total or 0
@@ -572,10 +572,10 @@ def get_leaderboard_from_scoreboard(limit=10):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT u.user_id, u.first_name, u.username, SUM(s.points_awarded) as total
+        SELECT u.id, u.first_name, u.username, SUM(s.points) as total
         FROM scoreboard s
-        JOIN users u ON s.user_id = u.user_id
-        GROUP BY u.user_id
+        JOIN users u ON s.user_id = u.id
+        GROUP BY u.id
         ORDER BY total DESC
         LIMIT ?
     """, (limit,))
@@ -623,9 +623,52 @@ def recalculate_rankings(period_days=7):
             rankings.append((user_id, ex_id, start_date, datetime.now(), i+1, points))
         cur.execute("DELETE FROM scoreboard WHERE exercise_id = ? AND period_start = ?", (ex_id, start_date))
         cur.executemany("""
-            INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points_awarded)
+            INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points)
             VALUES (?, ?, ?, ?, ?, ?)
         """, rankings)
+
+        # Комплексы
+        complexes = get_all_complexes()
+        for comp in complexes:
+            comp_id = comp[0]
+            metric = 'reps'  # или 'time' — нужно хранить в таблице complexes
+            if metric == 'reps':
+                query = """
+                        SELECT user_id, SUM(CAST(result_value AS INTEGER)) as best
+                        FROM workouts
+                        WHERE complex_id = ? \
+                          AND performed_at >= ?
+                        GROUP BY user_id
+                        ORDER BY best DESC \
+                        """
+            else:
+                query = """
+                        SELECT user_id, SUM(result_value) as best
+                        FROM workouts
+                        WHERE complex_id = ? \
+                          AND performed_at >= ?
+                        GROUP BY user_id
+                        ORDER BY best ASC \
+                        """
+            cur.execute(query, (comp_id, start_date))
+            results = cur.fetchall()
+            rankings = []
+            for i, (user_id, best) in enumerate(results):
+                if i == 0:
+                    points = 15
+                elif i == 1:
+                    points = 10
+                elif i == 2:
+                    points = 5
+                else:
+                    points = 0
+                rankings.append((user_id, -comp_id, start_date, datetime.now(), i + 1, points))
+            if rankings:
+                cur.execute("DELETE FROM scoreboard WHERE exercise_id = ? AND period_start = ?", (-comp_id, start_date))
+                cur.executemany("""
+                                INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """, rankings)
     conn.commit()
     conn.close()
     logger.info(f"Рейтинг пересчитан за период с {start_date} по {datetime.now()}")
@@ -685,7 +728,7 @@ def get_all_complexes():
     """Возвращает все комплексы."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT id, name, description, type, points, week, difficulty FROM complexes ORDER BY id")
+    cur.execute("SELECT id, name, description, type, points FROM complexes ORDER BY id")
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -845,7 +888,7 @@ def complete_challenge(user_id, challenge_id):
             WHERE user_id = ? AND challenge_id = ?
         """, (user_id, challenge_id))
         cur.execute("""
-            INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points_awarded)
+            INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (user_id, -challenge_id, datetime.now(), datetime.now(), 0, bonus))
         conn.commit()
@@ -917,7 +960,7 @@ def get_user_challenges_with_details(user_id):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
-        SELECT c.id, c.name, c.target_type, c.target_id, c.metric, c.target_value, c.bonus_points,
+        SELECT DISTINCT c.id, c.name, c.target_type, c.target_id, c.metric, c.target_value, c.bonus_points,
                c.start_date, c.end_date, COALESCE(p.current_value, '0') as current_value,
                CASE 
                    WHEN c.target_type = 'exercise' THEN e.name
@@ -1038,3 +1081,79 @@ def get_published_post_by_message_id(message_id):
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def distribute_challenge_bonus(challenge_id):
+    """Распределяет бонус между топ-3 участниками челленджа"""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    try:
+        # Получаем бонус и метрику челленджа
+        cur.execute("SELECT bonus_points, metric, target_value FROM challenges WHERE id = ?", (challenge_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return False
+        bonus_points, metric, target_value = row
+
+        # Получаем всех участников с их прогрессом
+        cur.execute("""
+            SELECT uc.user_id, p.current_value
+            FROM user_challenges uc
+            JOIN user_challenge_progress p ON uc.user_id = p.user_id AND uc.challenge_id = p.challenge_id
+            WHERE uc.challenge_id = ? AND uc.completed = 0
+        """, (challenge_id,))
+        participants = cur.fetchall()
+
+        # Фильтруем участников с None прогрессом
+        participants = [(uid, val) for uid, val in participants if val is not None]
+
+        if not participants:
+            # Нет участников с прогрессом — просто закрываем челлендж
+            cur.execute("""
+                UPDATE user_challenges
+                SET completed = 1, completed_at = CURRENT_TIMESTAMP
+                WHERE challenge_id = ?
+            """, (challenge_id,))
+            conn.commit()
+            conn.close()
+            return True
+
+        # Сортируем по прогрессу
+        if metric == 'reps':
+            participants.sort(key=lambda x: float(x[1]), reverse=True)
+        else:
+            participants.sort(key=lambda x: float(x[1]))
+
+        # Определяем топ-3
+        top3 = participants[:3]
+
+        # Распределяем бонус (50%, 30%, 20%)
+        distribution = [0.5, 0.3, 0.2]
+        for i, (user_id, progress) in enumerate(top3):
+            awarded = int(bonus_points * distribution[i])
+            if awarded > 0:
+                cur.execute("""
+                    INSERT INTO scoreboard (user_id, exercise_id, period_start, period_end, rank, points)
+                    VALUES (?, ?, datetime('now'), datetime('now'), ?, ?)
+                """, (user_id, -challenge_id, i + 1, awarded))
+
+        # Отмечаем всех участников как завершивших
+        cur.execute("""
+            UPDATE user_challenges
+            SET completed = 1, completed_at = CURRENT_TIMESTAMP
+            WHERE challenge_id = ?
+        """, (challenge_id,))
+
+        conn.commit()
+        conn.close()
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка при распределении бонуса челленджа: {e}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.close()
+        return False

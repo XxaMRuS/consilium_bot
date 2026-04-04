@@ -118,7 +118,7 @@ def parse_date(date_str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["🏋️ Спорт", "📸 Фото"],
-        ["🤖 Задать вопрос", "❌ Отмена"],
+        ["🤖 Спросить AI", "❌ Отмена"],
         ["🏆 Рейтинг", "⚙️ Админ"],
         ["📅 Календарь"],
     ]
@@ -1766,7 +1766,7 @@ async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Отменено.")
         keyboard = [
             ["🏋️ Спорт", "📸 Фото"],
-            ["🤖 Задать вопрос", "❌ Отмена"],
+            ["🤖 Спросить AI", "❌ Отмена"],
             ["🏆 Рейтинг", "⚙️ Админ"],
             ["📅 Календарь"],
         ]

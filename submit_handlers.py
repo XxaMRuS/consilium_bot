@@ -1,5 +1,6 @@
 import logging
 import re
+from database_backup import get_complex_exercises
 import sqlite3
 from datetime import datetime
 from functools import wraps
@@ -382,6 +383,7 @@ async def submit_comment_skip(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @log_call
 async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, comment):
+    debug_print(f"🔥 FINALIZE: user_data = {context.user_data}")
     """Сохранение результата и публикация в канал"""
     log_user_data(update, context, "finalize_submit")
     debug_print(f"🔥 finalize_submit: ВЫЗВАНА")
@@ -405,18 +407,81 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
 
     debug_print(f"🔥 finalize_submit: comment={comment}")
 
-    channel_post_id = context.user_data.get('submit_channel_post_id')
     channel_id = context.user_data.get('submit_channel_id')
+    channel_post_id = context.user_data.get('submit_channel_post_id')
 
-    # Если channel_id не сохранён в user_data (отправка не из канала), берём из настроек
-    if not channel_id:
-        from database import get_setting
-        channel_id_str = get_setting("public_channel")
-        if channel_id_str:
-            channel_id = int(channel_id_str)
-            debug_print(f"🔥 finalize_submit: channel_id взят из настроек: {channel_id}")
+    # ПРИНУДИТЕЛЬНО берём channel_id из настроек
+    from database import get_setting
+    channel_id_str = get_setting("public_channel")
+    if channel_id_str:
+        channel_id = int(channel_id_str)
+    else:
+        channel_id = None
+
+    # Всегда берём channel_id из настроек, игнорируя submit_channel_id
+    from database import get_setting
+    channel_id_str = get_setting("public_channel")
+    if channel_id_str:
+        channel_id = int(channel_id_str)
+        debug_print(f"🔥 finalize_submit: channel_id принудительно взят из настроек: {channel_id}")
+    else:
+        channel_id = None
+        debug_print(f"🔥 finalize_submit: channel_id не найден в настройках")
+    # Проверка: если это упражнение из комплекса
+    if 'current_complex_id' in context.user_data and entity_type == 'exercise':
+        from workout_handlers import get_complex_exercises
+        total_exercises = len(get_complex_exercises(context.user_data['current_complex_id']))
+        completed = len(context.user_data.get('completed_exercises', []))
+
+        if completed < total_exercises:
+            # Не все упражнения выполнены — не очищаем user_data
+            debug_print(
+                f"🔥 finalize_submit: выполнено {completed} из {total_exercises} упражнений комплекса. Продолжаем.")
+            # Очищаем только временные данные, но сохраняем прогресс комплекса
+            context.user_data.pop('submit_entity_name', None)
+            context.user_data.pop('submit_result', None)
+            context.user_data.pop('submit_video', None)
+            context.user_data.pop('_last_comment', None)
+            context.user_data.pop('submit_completed', None)
+            context.user_data.pop('conversation_state', None)
+            return
         else:
-            debug_print(f"🔥 finalize_submit: channel_id не найден ни в user_data, ни в настройках")
+            # ВСЕ УПРАЖНЕНИЯ ВЫПОЛНЕНЫ!
+            debug_print(f"🔥 finalize_submit: ВЫПОЛНЕН ВЕСЬ КОМПЛЕКС! {completed} из {total_exercises}")
+
+            # Распределяем бонусы комплекса между топ-3
+            from database import distribute_bonus_for_entity
+            complex_id = context.user_data.get('current_complex_id')
+            if complex_id:
+                distribute_bonus_for_entity('complex', complex_id)
+                debug_print(f"🔥 finalize_submit: бонусы комплекса {complex_id} распределены")
+
+            # Отправляем поздравление пользователю
+            complex_name = context.user_data.get('current_complex_name', 'комплекс')
+            await update.message.reply_text(
+                f"🎉 ПОЗДРАВЛЯЮ! Вы выполнили комплекс *{complex_name}*!\n\n"
+                f"🔥 Отличная работа! Так держать!",
+                parse_mode='Markdown'
+            )
+
+            # Отправляем в канал
+            if channel_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=channel_id,
+                        text=f"🏆 *{user_name}* выполнил(а) комплекс *{complex_name}*! 🔥",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    debug_print(f"🔥 finalize_submit: ошибка отправки в канал: {e}")
+
+            # Очищаем данные комплекса
+            context.user_data.pop('current_complex_id', None)
+            context.user_data.pop('current_complex_type', None)
+            context.user_data.pop('current_complex_name', None)
+            context.user_data.pop('current_complex_points', None)
+            context.user_data.pop('completed_exercises', None)
+            context.user_data.pop('complex_reps', None)
 
     context.user_data.pop('conversation_state', None)
 
@@ -458,7 +523,6 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
         debug_print(f"🔥 finalize_submit: ВОЗВРАТ None")
         return
 
-    # Публикуем в канал (только если channel_id есть)
     if channel_id:
         emoji = "💪" if entity_type == 'exercise' else "🏋️" if entity_type == 'complex' else "🏆"
         type_text = "упражнение" if entity_type == 'exercise' else "комплекс" if entity_type == 'complex' else "челлендж"
@@ -471,40 +535,24 @@ async def finalize_submit(update: Update, context: ContextTypes.DEFAULT_TYPE, co
         publish_text += f"\n🔥 Отличная работа!"
 
         try:
-            # Если есть channel_post_id, отвечаем на тот пост
-            if channel_post_id:
-                sent = await context.bot.send_message(
-                    chat_id=channel_id,
-                    text=publish_text,
-                    parse_mode='Markdown',
-                    reply_to_message_id=channel_post_id,
-                    disable_web_page_preview=True
-                )
-            else:
-                sent = await context.bot.send_message(
-                    chat_id=channel_id,
-                    text=publish_text,
-                    parse_mode='Markdown',
-                    disable_web_page_preview=True
-                )
+            # Отправляем в канал (убрал reply_to_message_id)
+            sent = await context.bot.send_message(
+                chat_id=channel_id,
+                text=publish_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
             logger.info(f"Результат опубликован в канале, message_id={sent.message_id}")
             debug_print(f"🔥 finalize_submit: результат опубликован в канале {channel_id}")
 
-            await update.message.reply_text(f"✅ Результат *{entity_name}* сохранён и опубликован в канале!",
-                                            parse_mode='Markdown')
+            if update.message:
+                await update.message.reply_text(f"✅ Результат *{entity_name}* сохранён и опубликован в канале!",
+                                                parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Ошибка публикации: {e}")
             debug_print(f"🔥 finalize_submit: ОШИБКА публикации: {e}")
-            await update.message.reply_text("✅ Результат сохранён, но не опубликован в канале.")
-    else:
-        debug_print(f"🔥 finalize_submit: channel_id отсутствует, публикация пропущена")
-        await update.message.reply_text(f"✅ Результат *{entity_name}* сохранён!", parse_mode='Markdown')
-
-    context.user_data.clear()
-    debug_print(f"🔥 finalize_submit: user_data очищен")
-    logger.info("finalize_submit завершена")
-    debug_print(f"🔥 finalize_submit: ВОЗВРАТ None")
-
+            if update.message:
+                await update.message.reply_text("✅ Результат сохранён, но не опубликован в канале.")
 
 @log_call
 async def cancel_submit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

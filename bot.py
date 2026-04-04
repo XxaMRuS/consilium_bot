@@ -66,7 +66,7 @@ from photo_processor import (
     convert_to_hard_rock, convert_to_pixel, convert_to_neon,
     convert_to_oil, convert_to_watercolor, convert_to_cartoon
 )
-from database import (
+from database_backup import (
     DB_NAME, init_db, add_user, get_exercises, add_workout, add_exercise,
     set_exercise_week, get_user_stats, get_leaderboard,
     get_all_exercises, delete_exercise,
@@ -79,7 +79,8 @@ from database import (
     update_challenge_progress, check_challenge_completion, get_user_challenges,
     complete_challenge, get_challenges_by_status, get_setting, set_setting, get_challenge_name, leave_challenge,
     get_user_challenges_with_details,
-    check_and_award_achievements, save_published_post, get_published_post_by_message_id, fix_scoreboard_duplicates
+    check_and_award_achievements, save_published_post, get_published_post_by_message_id,
+    distribute_challenge_bonus
 )
 from workout_handlers import (
     workout_start, exercise_choice, result_input, video_input,
@@ -111,6 +112,8 @@ WAIT_DELETE_ID = 41
 WAIT_DELETE_COMPLEX_ID = 42
 WAIT_DELETE_CHALLENGE_ID = 43
 EDIT_CHALLENGE_ID, EDIT_CHALLENGE_VALUE = range(60, 62)
+ASK_QUESTION = 100  # Состояние ожидания вопроса от пользователя
+ASK_ADMIN = 101  # Состояние ожидания вопроса администратору
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -296,9 +299,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         ["🏋️ Спорт", "📸 Фото"],
-        ["🤖 Задать вопрос", "❌ Отмена"],
-        ["🏆 Рейтинг", "⚙️ Админ"],
-        ["📅 Календарь", "🐞 Отладка"],
+        ["🤖 Спросить AI", "👨‍💼 Задать вопрос администратору"],
+        ["❌ Отмена", "🏆 Рейтинг"],
+        ["📅 Календарь", "⚙️ Админ"],
+        ["🐞 Отладка"],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     em = update.effective_message
@@ -862,6 +866,9 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == 'sport_challenges':
         debug_print(f"🔥 sport_callback_handler: ветка sport_challenges")
         await challenges_command(update, context)
+    elif data == 'sport_my_challenges':
+        debug_print(f"🔥 sport_callback_handler: ветка sport_my_challenges")
+        await my_challenges_command(update, context)
     elif data.startswith('join_challenge_'):
         debug_print(f"🔥 sport_callback_handler: ветка join_challenge_")
         logger.debug(f"🔹 Попытка присоединиться к челленджу: {data}")
@@ -880,12 +887,20 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         from utils import handle_cancel
         return await handle_cancel(update, context)
     elif data.startswith('complex_ex_'):
+        print(f"🔥🔥🔥 ВЕТКА complex_ex_ ВЫПОЛНЯЕТСЯ, data={data}")
         debug_print(f"🔥 sport_callback_handler: ветка complex_ex_")
-        # Выполнение упражнения из комплекса
         parts = data.split('_')
         exercise_id = int(parts[2])
         complex_id = int(parts[3])
         reps = int(parts[4])
+
+        # Сохраняем выполненные упражнения
+        if 'completed_exercises' not in context.user_data:
+            context.user_data['completed_exercises'] = []
+        if exercise_id not in context.user_data['completed_exercises']:
+            context.user_data['completed_exercises'].append(exercise_id)
+        print(f"🔥🔥🔥 completed_exercises: {context.user_data['completed_exercises']}")
+
         context.user_data['pending_exercise'] = exercise_id
         context.user_data['submit_entity_type'] = 'exercise'
         context.user_data['submit_entity_id'] = exercise_id
@@ -896,8 +911,6 @@ async def sport_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             context.user_data['conversation_state'] = state
     else:
         debug_print(f"🔥 sport_callback_handler: неизвестная ветка: {data}")
-
-    debug_print(f"📤 sport_callback_handler: ВОЗВРАТ")
 
 
 @log_call
@@ -1665,17 +1678,45 @@ async def join_challenge_command(update: Update, context: ContextTypes.DEFAULT_T
 async def my_challenges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_print(f"🔥 my_challenges_command: ВХОД")
 
-    challenges = get_user_challenges_with_details(update.effective_user.id)
+    user_id = update.effective_user.id
+    challenges = get_user_challenges_with_details(user_id)
+
     if not challenges:
-        await update.message.reply_text("Вы не участвуете в челленджах.")
+        if update.callback_query:
+            await update.callback_query.message.reply_text("Вы не участвуете в челленджах.")
+        else:
+            await update.message.reply_text("Вы не участвуете в челленджах.")
         debug_print(f"📤 my_challenges_command: ВОЗВРАТ (нет челленджей)")
         return
-    text = "🏆 **Ваши челленджи:**\n\n"
-    for ch in challenges:
-        text += f"**{ch[1]}** — прогресс: {ch[9]}/{ch[6]}\n"
-    await update.message.reply_text(text, parse_mode='Markdown')
-    debug_print(f"📤 my_challenges_command: ВОЗВРАТ")
 
+    # Создаём клавиатуру с кнопками для каждого челленджа
+    keyboard = []
+    for ch in challenges:
+        challenge_id = ch[0]  # id челленджа
+        challenge_name = ch[1]
+        current_progress = ch[9]
+        target = ch[6]
+
+        # Кнопка "Сдать результат" для каждого челленджа
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📊 {challenge_name} ({current_progress}/{target})",
+                callback_data=f"submit_challenge_{challenge_id}"
+            )
+        ])
+
+    # Добавляем кнопку "Назад"
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="sport_challenges")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "🏆 **Ваши челленджи:**\n\nНажмите на челлендж, чтобы сдать результат."
+
+    if update.callback_query:
+        await update.callback_query.message.edit_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+    debug_print(f"📤 my_challenges_command: ВОЗВРАТ")
 
 @log_call
 async def myprogress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2488,7 +2529,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Задать вопрос
-    if text == "🤖 Задать вопрос":
+    if text == "🤖 Спросить AI":
         await update.message.reply_text("Напиши свой вопрос, и я постараюсь помочь!")
         debug_print(f"📤 menu_handler: ВОЗВРАТ (Задать вопрос)")
         return
@@ -2572,7 +2613,7 @@ async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Отменено.")
         keyboard = [
             ["🏋️ Спорт", "📸 Фото"],
-            ["🤖 Задать вопрос", "❌ Отмена"],
+            ["🤖 Спросить AI", "❌ Отмена"],
             ["🏆 Рейтинг", "⚙️ Админ"],
             ["📅 Календарь", "🐞 Отладка"],
         ]
@@ -2581,7 +2622,25 @@ async def do_exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         debug_print(f"📤 do_exercise_callback: ВОЗВРАТ (cancel_catalog)")
         return
 
-    exercise_id = int(data.split('_')[2])
+    # Извлекаем exercise_id (для форматов: do_exercise_2 или complex_ex_2_1_50)
+    parts = data.split('_')
+    exercise_id = int(parts[2])
+
+    # Если это упражнение из комплекса (callback начинается с complex_ex_)
+    if data.startswith('complex_ex_'):
+        complex_id = int(parts[3])
+        reps = int(parts[4])
+
+        # Сохраняем выполненные упражнения
+        if 'completed_exercises' not in context.user_data:
+            context.user_data['completed_exercises'] = []
+        if exercise_id not in context.user_data['completed_exercises']:
+            context.user_data['completed_exercises'].append(exercise_id)
+        print(f"🔥🔥🔥 completed_exercises: {context.user_data['completed_exercises']}")
+
+        context.user_data['complex_reps'] = reps
+        context.user_data['current_complex_id'] = complex_id
+
     context.user_data['pending_exercise'] = exercise_id
     context.user_data['submit_entity_type'] = 'exercise'
     context.user_data['submit_entity_id'] = exercise_id
@@ -2740,6 +2799,106 @@ async def myhistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown', disable_web_page_preview=True)
     debug_print(f"📤 myhistory_command: ВОЗВРАТ")
 
+async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Задать вопрос' - переводим в режим ожидания вопроса"""
+    await update.message.reply_text(
+        "📝 Напиши свой вопрос. Я отправлю его администратору.\n\n"
+        "Дождись ответа или нажми /cancel для отмены."
+    )
+    return ASK_QUESTION  # Переходим в состояние ожидания вопроса
+
+
+async def handle_question_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимаем текст вопроса и пересылаем админу"""
+    user_question = update.message.text
+    user = update.effective_user
+
+    # Формируем сообщение для админа
+    admin_message = (
+        f"📬 **Новый вопрос от пользователя**\n"
+        f"👤 Имя: {user.first_name} {user.last_name or ''}\n"
+        f"🆔 ID: {user.id}\n"
+        f"💬 Вопрос:\n{user_question}"
+    )
+
+    # Отправляем админу
+    user_id = update.effective_user.id
+
+    try:
+        print(f"🔍 Пытаюсь отправить сообщение админу {ADMIN_ID}")
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode='Markdown')
+        print(f"✅ Сообщение отправлено админу {ADMIN_ID}")
+
+        # ТЕСТ: отправляем пользователю (себе) уведомление
+        await context.bot.send_message(chat_id=user_id, text="🔔 Это тестовое сообщение от бота (проверка отправки)")
+        print(f"✅ Тестовое сообщение отправлено пользователю {user_id}")
+
+    except Exception as e:
+        print(f"❌ ОШИБКА отправки: {type(e).__name__}: {e}")
+
+    # Подтверждаем пользователю
+    await update.message.reply_text(
+        "✅ Вопрос отправлен администратору. Ответ придёт сюда, как только он ответит.\n\n"
+        "Спасибо за обращение!"
+    )
+
+    return ConversationHandler.END
+
+async def ask_question_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена отправки вопроса"""
+    await update.message.reply_text("❌ Отправка вопроса отменена.")
+    return ConversationHandler.END
+
+async def ask_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало вопроса администратору"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "📝 Напиши вопрос администратору. Он ответит как можно быстрее.\n\n"
+        "(Чтобы отменить, нажми /cancel)"
+    )
+    return ASK_ADMIN
+
+
+async def handle_admin_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимаем текст вопроса и пересылаем админу"""
+    user_question = update.message.text
+    user = update.effective_user
+
+    # Формируем сообщение для админа
+    admin_message = (
+        f"📬 **Новый вопрос от пользователя (администратору)**\n"
+        f"👤 Имя: {user.first_name} {user.last_name or ''}\n"
+        f"🆔 ID: {user.id}\n"
+        f"💬 Вопрос:\n{user_question}"
+    )
+
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode='Markdown')
+        print(f"✅ Вопрос администратору отправлен")
+    except Exception as e:
+        print(f"❌ Ошибка отправки админу: {e}")
+
+    await update.message.reply_text(
+        "✅ Вопрос отправлен администратору. Ответ придёт сюда, как только он ответит.\n\n"
+        "Спасибо за обращение!"
+    )
+
+    return ConversationHandler.END
+
+async def ask_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена отправки вопроса администратору"""
+    await update.message.reply_text("❌ Отправка вопроса отменена.")
+    return ConversationHandler.END
+
+async def ask_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик обычной кнопки 'Задать вопрос администратору'"""
+    await update.message.reply_text(
+        "📝 Напиши вопрос администратору. Он ответит как можно быстрее.\n\n"
+        "(Чтобы отменить, нажми /cancel)"
+    )
+    return ASK_ADMIN
+
 # ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
 @log_call
 def main():
@@ -2807,6 +2966,8 @@ def main():
     # /skip используется в submit-потоке (комментарий к видео) при отсутствии ConversationHandler
     app.add_handler(CommandHandler("skip", submit_comment_skip))
     app.add_handler(CommandHandler("testresult", testresult_command))
+    app.add_handler(CommandHandler("finish_challenge", finish_challenge_command))
+    app.add_handler(CommandHandler("finish_challenge", finish_challenge_command))
 
     # Callback handlers для упражнений и комплексов
     app.add_handler(CallbackQueryHandler(do_exercise_callback, pattern='^do_exercise_'))
@@ -2868,6 +3029,7 @@ def main():
             ],
             COMPLEX_EXERCISE: [
                 CallbackQueryHandler(complex_exercise_choice, pattern='^complex_ex_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, result_input),
             ]},
         fallbacks=[
             CommandHandler('cancel', workout_cancel),
@@ -3019,8 +3181,35 @@ def main():
     # Календарь и челленджи
     app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
     app.add_handler(CallbackQueryHandler(join_challenge_callback, pattern='^join_challenge_'))
+    # Календарь и челленджи
+    app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal_"))
+    app.add_handler(CallbackQueryHandler(join_challenge_callback, pattern='^join_challenge_'))
+
+    # ConversationHandler для вопросов администратору
+    ask_admin_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("👨‍💼 Задать вопрос администратору"), ask_admin_message)],
+        states={
+            ASK_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_question)],
+        },
+        fallbacks=[CommandHandler('cancel', ask_admin_cancel)],
+    )
+    app.add_handler(ask_admin_conv)
 
     # Message handlers
+    # Сначала специфичные обработчики для текстовых кнопок
+    app.add_handler(MessageHandler(filters.Text("👨‍💼 Задать вопрос администратору"), ask_admin_message))
+
+    # ConversationHandler для AI вопросов
+    ai_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("🤖 Спросить AI"), ask_ai_start)],
+        states={
+            ASK_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_question)],
+        },
+        fallbacks=[CommandHandler('cancel', ask_question_cancel)],
+    )
+    app.add_handler(ai_conv)
+
+    # Обработчики фото и всего остального
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, catch_all_text))
 
@@ -3083,6 +3272,65 @@ import threading
 threading.Thread(target=run_health_server, daemon=True).start()
 # ============================================
 
+async def ask_ai_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Спросить AI'"""
+    await update.message.reply_text(
+        "🤖 Напиши свой вопрос. Я отвечу с помощью AI.\n\n"
+        "Отправь текст или нажми /cancel для отмены."
+    )
+    return ASK_QUESTION
+
+
+async def handle_ai_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текста вопроса и отправка в AI"""
+    user_question = update.message.text
+
+    await update.message.chat.send_action(action="typing")
+
+    try:
+        if 'user_history' not in context.user_data:
+            from collections import deque
+            context.user_data['user_history'] = deque(maxlen=5)
+
+        answer = start_consilium(user_question, context.user_data['user_history'])
+        clean_answer = clean_markdown(answer)
+
+        if len(clean_answer) > 4000:
+            for i in range(0, len(clean_answer), 4000):
+                await update.message.reply_text(clean_answer[i:i + 4000])
+        else:
+            await update.message.reply_text(clean_answer)
+    except Exception as e:
+        logger.exception("Ошибка в handle_ai_question")
+        await update.message.reply_text(format_error("Ошибка при ответе AI."))
+
+    return ConversationHandler.END
+
+
+async def finish_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершает челлендж и распределяет бонусы (только для админа)"""
+    print(f"🔥 КОМАНДА ВЫЗВАНА: /finish_challenge {context.args}")
+
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+
+    try:
+        challenge_id = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("Использование: /finish_challenge <id>")
+        return
+
+    try:
+        success = distribute_challenge_bonus(challenge_id)
+        if success:
+            await update.message.reply_text(f"✅ Челлендж #{challenge_id} завершён, бонусы распределены.")
+        else:
+            await update.message.reply_text(f"❌ Ошибка при завершении челленджа #{challenge_id}.")
+    except Exception as e:
+        await update.message.reply_text(f"🔥 Ошибка: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     try:
